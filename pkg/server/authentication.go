@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -169,7 +169,7 @@ func (s *authenticationServer) UserLogout(
 		ctx,
 		"revoke-auth-session",
 		nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		`UPDATE system.web_sessions SET "revokedAt" = now() WHERE id = $1`,
 		sessionID,
 	); err != nil {
@@ -217,7 +217,7 @@ WHERE id = $1`
 		ctx,
 		"lookup-auth-session",
 		nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		sessionQuery, cookie.ID)
 	if row == nil || err != nil {
 		return false, "", err
@@ -324,7 +324,7 @@ RETURNING id
 		ctx,
 		"create-auth-session",
 		nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		insertSessionStmt,
 		hashedSecret,
 		username,
@@ -394,7 +394,7 @@ func (am *authenticationMux) ServeHTTP(w http.ResponseWriter, req *http.Request)
 		ctx = context.WithValue(ctx, webSessionIDKey{}, cookie.ID)
 		req = req.WithContext(ctx)
 	} else if !am.allowAnonymous {
-		log.Infof(req.Context(), "Web session error: %s", err)
+		log.Infof(req.Context(), "web session error: %s", err)
 		http.Error(w, "a valid authentication cookie is required", http.StatusUnauthorized)
 		return
 	}

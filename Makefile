@@ -121,7 +121,7 @@ TESTCONFIG :=
 SUBTESTS :=
 
 ## Test timeout to use for the linter.
-LINTTIMEOUT := 20m
+LINTTIMEOUT := 30m
 
 ## Test timeout to use for regular tests.
 TESTTIMEOUT := 30m
@@ -772,8 +772,27 @@ $(LIBPROTOBUF): $(PROTOBUF_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 $(LIBSNAPPY): $(SNAPPY_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $@ $(SNAPPY_SRC_DIR) || $(MAKE) --no-print-directory -C $(SNAPPY_DIR) snappy
 
+ifdef is-cross-compile
+ifdef target-is-macos
+geos_require_install_name_tool := 1
+endif
+endif
+
+# For dlopen to work with OSX from any location, we need the @rpath directory prefix.
+# However, no matter what CMake flags I try, cross-compiling OSX does not output
+# the correct rpath locations. As such, use the install-name-tool to do the work
+# of setting the correct rpaths on OSX.
 GEOS_NATIVE_LIB_DIR = $(GEOS_DIR)/$(if $(target-is-windows),bin,lib)
-$(LIBGEOS): $(GEOS_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
+ifdef geos_require_install_name_tool
+$(LIBGEOS): libgeos_inner .ALWAYS_REBUILD
+	$(TARGET_TRIPLE)-install_name_tool -id @rpath/libgeos.3.8.1.dylib lib/libgeos.dylib
+	$(TARGET_TRIPLE)-install_name_tool -id @rpath/libgeos_c.1.dylib lib/libgeos_c.dylib
+	$(TARGET_TRIPLE)-install_name_tool -change "$(GEOS_NATIVE_LIB_DIR)/libgeos.3.8.1.dylib" "@rpath/libgeos.3.8.1.dylib" lib.docker_amd64/libgeos_c.dylib
+else
+$(LIBGEOS): libgeos_inner .ALWAYS_REBUILD
+endif
+
+libgeos_inner: $(GEOS_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $(GEOS_NATIVE_LIB_DIR)/libgeos.$(DYN_EXT) $(GEOS_SRC_DIR) || $(MAKE) --no-print-directory -C $(GEOS_DIR) geos_c
 	mkdir -p $(DYN_LIB_DIR)
 	rm -f $(DYN_LIB_DIR)/lib{geos,geos_c}.$(DYN_EXT)
@@ -853,9 +872,13 @@ DOCGEN_TARGETS := bin/.docgen_bnfs bin/.docgen_functions docs/generated/redact_s
 
 EXECGEN_TARGETS = \
   pkg/col/coldata/vec.eg.go \
+  pkg/sql/colconv/vec_to_datum.eg.go \
   pkg/sql/colexec/and_or_projection.eg.go \
   pkg/sql/colexec/cast.eg.go \
   pkg/sql/colexec/const.eg.go \
+  pkg/sql/colexec/default_cmp_expr.eg.go \
+  pkg/sql/colexec/default_cmp_proj_ops.eg.go \
+  pkg/sql/colexec/default_cmp_sel_ops.eg.go \
   pkg/sql/colexec/distinct.eg.go \
   pkg/sql/colexec/hashjoiner.eg.go \
   pkg/sql/colexec/hashtable_distinct.eg.go \
@@ -867,10 +890,12 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/hash_bool_and_or_agg.eg.go \
   pkg/sql/colexec/hash_concat_agg.eg.go \
   pkg/sql/colexec/hash_count_agg.eg.go \
+  pkg/sql/colexec/hash_default_agg.eg.go \
   pkg/sql/colexec/hash_min_max_agg.eg.go \
   pkg/sql/colexec/hash_sum_agg.eg.go \
   pkg/sql/colexec/hash_sum_int_agg.eg.go \
   pkg/sql/colexec/hash_utils.eg.go \
+  pkg/sql/colexec/is_null_ops.eg.go \
   pkg/sql/colexec/like_ops.eg.go \
   pkg/sql/colexec/mergejoinbase.eg.go \
   pkg/sql/colexec/mergejoiner_exceptall.eg.go \
@@ -886,6 +911,7 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/ordered_bool_and_or_agg.eg.go \
   pkg/sql/colexec/ordered_concat_agg.eg.go \
   pkg/sql/colexec/ordered_count_agg.eg.go \
+  pkg/sql/colexec/ordered_default_agg.eg.go \
   pkg/sql/colexec/ordered_min_max_agg.eg.go \
   pkg/sql/colexec/ordered_sum_agg.eg.go \
   pkg/sql/colexec/ordered_sum_int_agg.eg.go \
@@ -905,7 +931,6 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/utils.eg.go \
   pkg/sql/colexec/values_differ.eg.go \
   pkg/sql/colexec/vec_comparators.eg.go \
-  pkg/sql/colexec/vec_to_datum.eg.go \
   pkg/sql/colexec/window_peer_grouper.eg.go
 
 OPTGEN_TARGETS = \
@@ -915,7 +940,8 @@ OPTGEN_TARGETS = \
 	pkg/sql/opt/norm/factory.og.go \
 	pkg/sql/opt/rule_name.og.go \
 	pkg/sql/opt/rule_name_string.go \
-	pkg/sql/opt/exec/factory.og.go
+	pkg/sql/opt/exec/factory.og.go \
+	pkg/sql/opt/exec/explain/explain_factory.og.go
 
 go-targets-ccl := \
 	$(COCKROACH) $(COCKROACHSHORT) \
@@ -1558,10 +1584,10 @@ bin/.docgen_functions: bin/docgen
 
 bin/.docgen_http: bin/docgen $(PROTOC)
 	docgen http \
-		--protoc $(PROTOC) \
-		--gendoc ./bin/protoc-gen-doc \
-		--out docs/generated/http \
-		--protobuf pkg:$(GOGO_PROTOBUF_PATH):$(PROTOBUF_PATH):$(COREOS_PATH):$(GRPC_GATEWAY_GOOGLEAPIS_PATH):$(ERRORS_PATH)
+	--protoc $(PROTOC) \
+	--gendoc ./bin/protoc-gen-doc \
+	--out docs/generated/http \
+	--protobuf pkg:$(GOGO_PROTOBUF_PATH):$(PROTOBUF_PATH):$(COREOS_PATH):$(GRPC_GATEWAY_GOOGLEAPIS_PATH):$(ERRORS_PATH)
 	touch $@
 
 .PHONY: docs/generated/redact_safe.md
@@ -1618,6 +1644,9 @@ pkg/sql/opt/norm/factory.og.go: $(optgen-defs) $(optgen-norm-rules) bin/optgen
 
 pkg/sql/opt/exec/factory.og.go: $(optgen-defs) $(optgen-exec-defs) bin/optgen
 	optgen -out $@ execfactory $(optgen-exec-defs)
+
+pkg/sql/opt/exec/explain/explain_factory.og.go: $(optgen-defs) $(optgen-exec-defs) bin/optgen
+	optgen -out $@ execexplain $(optgen-exec-defs)
 
 # Format non-generated .cc and .h files in libroach using clang-format.
 .PHONY: c-deps-fmt
@@ -1705,9 +1734,11 @@ bins = \
   bin/roachprod \
   bin/roachprod-stress \
   bin/roachtest \
+	bin/skip-test \
   bin/teamcity-trigger \
   bin/uptodate \
   bin/urlcheck \
+	bin/whoownsit \
   bin/workload \
   bin/zerosum
 

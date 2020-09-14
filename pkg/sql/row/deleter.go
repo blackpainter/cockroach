@@ -17,8 +17,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -37,13 +38,8 @@ type Deleter struct {
 // expectation of which values are passed as values to DeleteRow. Any column
 // passed in requestedCols will be included in FetchCols.
 func MakeDeleter(
-	ctx context.Context,
-	txn *kv.Txn,
-	codec keys.SQLCodec,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
-	requestedCols []descpb.ColumnDescriptor,
-	alloc *sqlbase.DatumAlloc,
-) (Deleter, error) {
+	codec keys.SQLCodec, tableDesc *tabledesc.Immutable, requestedCols []descpb.ColumnDescriptor,
+) Deleter {
 	indexes := tableDesc.DeletableIndexes()
 
 	fetchCols := requestedCols[:len(requestedCols):len(requestedCols)]
@@ -62,19 +58,19 @@ func MakeDeleter(
 	}
 	for _, colID := range tableDesc.PrimaryIndex.ColumnIDs {
 		if err := maybeAddCol(colID); err != nil {
-			return Deleter{}, err
+			return Deleter{}
 		}
 	}
 	for _, index := range indexes {
 		for _, colID := range index.ColumnIDs {
 			if err := maybeAddCol(colID); err != nil {
-				return Deleter{}, err
+				return Deleter{}
 			}
 		}
 		// The extra columns are needed to fix #14601.
 		for _, colID := range index.ExtraColumnIDs {
 			if err := maybeAddCol(colID); err != nil {
-				return Deleter{}, err
+				return Deleter{}
 			}
 		}
 	}
@@ -85,7 +81,7 @@ func MakeDeleter(
 		FetchColIDtoRowIndex: fetchColIDtoRowIndex,
 	}
 
-	return rd, nil
+	return rd
 }
 
 // DeleteRow adds to the batch the kv operations necessary to delete a table row
@@ -105,7 +101,7 @@ func (rd *Deleter) DeleteRow(
 		}
 
 		// We want to include empty k/v pairs because we want to delete all k/v's for this row.
-		entries, err := sqlbase.EncodeSecondaryIndex(
+		entries, err := rowenc.EncodeSecondaryIndex(
 			rd.Helper.Codec,
 			rd.Helper.TableDesc,
 			&rd.Helper.Indexes[i],
@@ -130,23 +126,25 @@ func (rd *Deleter) DeleteRow(
 	}
 
 	// Delete the row.
-	for i := range rd.Helper.TableDesc.Families {
-		if i > 0 {
+	var called bool
+	return rd.Helper.TableDesc.ForeachFamily(func(family *descpb.ColumnFamilyDescriptor) error {
+		if called {
 			// HACK: MakeFamilyKey appends to its argument, so on every loop iteration
 			// after the first, trim primaryIndexKey so nothing gets overwritten.
 			// TODO(dan): Instead of this, use something like engine.ChunkAllocator.
 			primaryIndexKey = primaryIndexKey[:len(primaryIndexKey):len(primaryIndexKey)]
+		} else {
+			called = true
 		}
-		familyID := rd.Helper.TableDesc.Families[i].ID
+		familyID := family.ID
 		rd.key = keys.MakeFamilyKey(primaryIndexKey, uint32(familyID))
 		if traceKV {
 			log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(rd.Helper.primIndexValDirs, rd.key))
 		}
 		b.Del(&rd.key)
 		rd.key = nil
-	}
-
-	return nil
+		return nil
+	})
 }
 
 // DeleteIndexRow adds to the batch the kv operations necessary to delete a
@@ -158,7 +156,7 @@ func (rd *Deleter) DeleteIndexRow(
 	// to delete all k/v's for this row. By setting includeEmpty
 	// to true, we will get a k/v pair for each family in the row,
 	// which will guarantee that we delete all the k/v's in this row.
-	secondaryIndexEntry, err := sqlbase.EncodeSecondaryIndex(
+	secondaryIndexEntry, err := rowenc.EncodeSecondaryIndex(
 		rd.Helper.Codec,
 		rd.Helper.TableDesc,
 		idx,

@@ -17,15 +17,13 @@ import (
 	"time"
 
 	"github.com/axiomhq/hyperloglog"
-	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -241,27 +239,15 @@ var TestingSamplerSleep time.Duration
 
 func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err error) {
 	rng, _ := randutil.NewPseudoRand()
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	var buf []byte
 	rowCount := 0
 	lastWakeupTime := timeutil.Now()
 
-	// Inverted index variables for EncodeInvertedIndexKeys.
-	// TODO(mjibson): Once we support configuring geospatial indexes
-	// via SQL, we will need to pass down the actual index descriptors
-	// or something to here so that we can generate the correct inverted
-	// index keys. At this point we'll also need to worry about users who
-	// have multiple indexes with different configurations over the same
-	// column. For now, since we don't even allow users to change the
-	// defaults, we can just not worry about it.
-	invIndexDesc := &descpb.IndexDescriptor{
-		GeoConfig: geoindex.Config{
-			S2Geography: geoindex.DefaultGeographyIndexConfig().S2Geography,
-			S2Geometry:  geoindex.DefaultGeometryIndexConfig().S2Geometry,
-		},
-	}
 	var invKeys [][]byte
-	invRow := sqlbase.EncDatumRow{sqlbase.EncDatum{}}
+	invRow := rowenc.EncDatumRow{rowenc.EncDatum{}}
+	timer := timeutil.NewTimer()
+	defer timer.Stop()
 
 	for {
 		row, meta := s.input.Next()
@@ -317,10 +303,10 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 					if wait > maxIdleSleepTime {
 						wait = maxIdleSleepTime
 					}
-					timer := time.NewTimer(wait)
-					defer timer.Stop()
+					timer.Reset(wait)
 					select {
 					case <-timer.C:
+						timer.Read = true
 						break
 					case <-s.flowCtx.Stopper().ShouldStop():
 						break
@@ -347,11 +333,18 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 			if err := row[col].EnsureDecoded(s.outTypes[col], &da); err != nil {
 				return false, err
 			}
+
+			index := s.invSketch[col].spec.Index
+			if index == nil {
+				// If we don't have an index descriptor don't attempt to generate inverted
+				// index entries.
+				continue
+			}
 			switch s.outTypes[col].Family() {
 			case types.GeographyFamily, types.GeometryFamily:
-				invKeys, err = sqlbase.EncodeGeoInvertedIndexTableKeys(row[col].Datum, nil /* inKey */, invIndexDesc)
+				invKeys, err = rowenc.EncodeGeoInvertedIndexTableKeys(row[col].Datum, nil /* inKey */, index)
 			default:
-				invKeys, err = sqlbase.EncodeInvertedIndexTableKeys(row[col].Datum, nil /* inKey */)
+				invKeys, err = rowenc.EncodeInvertedIndexTableKeys(row[col].Datum, nil /* inKey */)
 			}
 			if err != nil {
 				return false, err
@@ -368,27 +361,27 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 		}
 	}
 
-	outRow := make(sqlbase.EncDatumRow, len(s.outTypes))
+	outRow := make(rowenc.EncDatumRow, len(s.outTypes))
 	// Emit the sampled rows.
 	for i := range outRow {
-		outRow[i] = sqlbase.DatumToEncDatum(s.outTypes[i], tree.DNull)
+		outRow[i] = rowenc.DatumToEncDatum(s.outTypes[i], tree.DNull)
 	}
 	for _, sample := range s.sr.Get() {
 		copy(outRow, sample.Row)
-		outRow[s.rankCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(sample.Rank))}
+		outRow[s.rankCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(sample.Rank))}
 		if !emitHelper(ctx, &s.Out, outRow, nil /* meta */, s.pushTrailingMeta, s.input) {
 			return true, nil
 		}
 	}
 	// Emit the inverted sample rows.
 	for i := range outRow {
-		outRow[i] = sqlbase.DatumToEncDatum(s.outTypes[i], tree.DNull)
+		outRow[i] = rowenc.DatumToEncDatum(s.outTypes[i], tree.DNull)
 	}
 	for col, invSr := range s.invSr {
-		outRow[s.invColIdxCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(col))}
+		outRow[s.invColIdxCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(col))}
 		for _, sample := range invSr.Get() {
 			// Reuse the rank column for inverted index keys.
-			outRow[s.rankCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(sample.Rank))}
+			outRow[s.rankCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(sample.Rank))}
 			outRow[s.invIdxKeyCol] = sample.Row[0]
 			if !emitHelper(ctx, &s.Out, outRow, nil /* meta */, s.pushTrailingMeta, s.input) {
 				return true, nil
@@ -401,10 +394,10 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 
 	// Emit the sketch rows.
 	for i := range outRow {
-		outRow[i] = sqlbase.DatumToEncDatum(s.outTypes[i], tree.DNull)
+		outRow[i] = rowenc.DatumToEncDatum(s.outTypes[i], tree.DNull)
 	}
 	for i, si := range s.sketches {
-		outRow[s.sketchIdxCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(i))}
+		outRow[s.sketchIdxCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(i))}
 		if earlyExit, err := s.emitSketchRow(ctx, &si, outRow); earlyExit || err != nil {
 			return earlyExit, err
 		}
@@ -412,10 +405,10 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 
 	// Emit the inverted sketch rows.
 	for i := range outRow {
-		outRow[i] = sqlbase.DatumToEncDatum(s.outTypes[i], tree.DNull)
+		outRow[i] = rowenc.DatumToEncDatum(s.outTypes[i], tree.DNull)
 	}
 	for col, invSketch := range s.invSketch {
-		outRow[s.invColIdxCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(col))}
+		outRow[s.invColIdxCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(col))}
 		if earlyExit, err := s.emitSketchRow(ctx, invSketch, outRow); earlyExit || err != nil {
 			return earlyExit, err
 		}
@@ -433,15 +426,15 @@ func (s *samplerProcessor) mainLoop(ctx context.Context) (earlyExit bool, err er
 }
 
 func (s *samplerProcessor) emitSketchRow(
-	ctx context.Context, si *sketchInfo, outRow sqlbase.EncDatumRow,
+	ctx context.Context, si *sketchInfo, outRow rowenc.EncDatumRow,
 ) (earlyExit bool, err error) {
-	outRow[s.numRowsCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(si.numRows))}
-	outRow[s.numNullsCol] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(si.numNulls))}
+	outRow[s.numRowsCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(si.numRows))}
+	outRow[s.numNullsCol] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(si.numNulls))}
 	data, err := si.sketch.MarshalBinary()
 	if err != nil {
 		return false, err
 	}
-	outRow[s.sketchCol] = sqlbase.EncDatum{Datum: tree.NewDBytes(tree.DBytes(data))}
+	outRow[s.sketchCol] = rowenc.EncDatum{Datum: tree.NewDBytes(tree.DBytes(data))}
 	if !emitHelper(ctx, &s.Out, outRow, nil /* meta */, s.pushTrailingMeta, s.input) {
 		return true, nil
 	}
@@ -450,7 +443,7 @@ func (s *samplerProcessor) emitSketchRow(
 
 // sampleRow looks at a row and either drops it or adds it to the reservoir.
 func (s *samplerProcessor) sampleRow(
-	ctx context.Context, sr *stats.SampleReservoir, row sqlbase.EncDatumRow, rng *rand.Rand,
+	ctx context.Context, sr *stats.SampleReservoir, row rowenc.EncDatumRow, rng *rand.Rand,
 ) (earlyExit bool, err error) {
 	// Use Int63 so we don't have headaches converting to DInt.
 	rank := uint64(rng.Int63())
@@ -483,9 +476,17 @@ func (s *samplerProcessor) close() {
 	}
 }
 
+var _ execinfra.DoesNotUseTxn = &samplerProcessor{}
+
+// DoesNotUseTxn implements the DoesNotUseTxn interface.
+func (s *samplerProcessor) DoesNotUseTxn() bool {
+	txnUser, ok := s.input.(execinfra.DoesNotUseTxn)
+	return ok && txnUser.DoesNotUseTxn()
+}
+
 // addRow adds a row to the sketch and updates row counts.
 func (s *sketchInfo) addRow(
-	row sqlbase.EncDatumRow, typs []*types.T, buf *[]byte, da *sqlbase.DatumAlloc,
+	row rowenc.EncDatumRow, typs []*types.T, buf *[]byte, da *rowenc.DatumAlloc,
 ) error {
 	var err error
 	var intbuf [8]byte

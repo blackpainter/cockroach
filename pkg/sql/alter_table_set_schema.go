@@ -15,16 +15,16 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 type alterTableSetSchemaNode struct {
 	newSchema string
-	tableDesc *sqlbase.MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
 	n         *tree.AlterTableSetSchema
 }
 
@@ -48,6 +48,10 @@ func (p *planner) AlterTableSetSchema(
 	if tableDesc == nil {
 		// Noop.
 		return newZeroNode(nil /* columns */), nil
+	}
+
+	if err := checkViewMatchesMaterialized(tableDesc, n.IsView, n.IsMaterialized); err != nil {
+		return nil, err
 	}
 
 	if tableDesc.Temporary {

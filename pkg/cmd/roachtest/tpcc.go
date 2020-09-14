@@ -149,6 +149,9 @@ func setupTPCC(
 			t.Status("initializing tables")
 			cmd := fmt.Sprintf("./workload init tpcc --warehouses=%d %s {pgurl:1}",
 				opts.Warehouses, opts.ExtraSetupArgs)
+			if !t.buildVersion.AtLeast(version.MustParse("v20.2.0")) {
+				cmd += " --deprecated-fk-indexes"
+			}
 			c.Run(ctx, workloadNode, cmd)
 		default:
 			t.Fatal("unknown tpcc setup type")
@@ -414,7 +417,7 @@ func registerTPCC(r *testRegistry) {
 		LoadWarehouses: 5000,
 		EstimatedMax:   3000,
 
-		MinVersion: "v19.1.0",
+		MinVersion: "v20.1.0",
 	})
 	registerTPCCBenchSpec(r, tpccBenchSpec{
 		Nodes:      9,
@@ -425,7 +428,7 @@ func registerTPCC(r *testRegistry) {
 		LoadWarehouses: 2000,
 		EstimatedMax:   900,
 
-		MinVersion: "v19.1.0",
+		MinVersion: "v20.1.0",
 	})
 }
 

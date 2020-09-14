@@ -1,9 +1,5 @@
 # LogicTest: local
 
-# TODO(mgartner): remove this once partial indexes are fully supported.
-statement ok
-SET experimental_partial_indexes=on
-
 statement ok
 CREATE TABLE t (
     a INT PRIMARY KEY,
@@ -32,12 +28,12 @@ CREATE TABLE u (
 query T kvtrace
 SELECT a FROM t WHERE a > b AND c = 'foo'
 ----
-Scan /Table/53/{4-5}
+Scan /Table/53/4/"foo"{-/PrefixEnd}
 
 query T kvtrace
 SELECT a FROM t@c_partial WHERE a > b AND c = 'foo'
 ----
-Scan /Table/53/{4-5}
+Scan /Table/53/4/"foo"{-/PrefixEnd}
 
 statement error index "c_partial" is a partial index that does not contain all the rows needed to execute this query
 SELECT a FROM t@c_partial WHERE a > b AND c = 'bar'
@@ -683,8 +679,9 @@ CPut /Table/54/2/4/2/0 -> /BYTES/ (expecting does not exist)
 query TTT
 EXPLAIN SELECT b FROM t WHERE b > 10
 ----
-·     distribution  local
-·     vectorized    true
-scan  ·             ·
-·     table         t@b_partial (partial index)
-·     spans         FULL SCAN
+·     distribution   local
+·     vectorized     true
+scan  ·              ·
+·     missing stats  ·
+·     table          t@b_partial (partial index)
+·     spans          FULL SCAN

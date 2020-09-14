@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -95,7 +96,7 @@ func benchmarkBuiltinFunctions(b *testing.B, useSelectionVector bool, hasNulls b
 		},
 	}
 
-	batch := testAllocator.NewMemBatch([]*types.T{types.Int})
+	batch := testAllocator.NewMemBatchWithMaxCapacity([]*types.T{types.Int})
 	col := batch.ColVec(0).Int64()
 
 	for i := 0; i < coldata.BatchSize(); i++ {
@@ -155,10 +156,11 @@ func BenchmarkBuiltinFunctions(b *testing.B) {
 // and the specialized operator.
 func BenchmarkCompareSpecializedOperators(b *testing.B) {
 	ctx := context.Background()
-	tctx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
+	evalCtx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
+	defer evalCtx.Stop(ctx)
 
 	typs := []*types.T{types.String, types.Int, types.Int}
-	batch := testAllocator.NewMemBatch(typs)
+	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 	outputIdx := 3
 	bCol := batch.ColVec(0).Bytes()
 	sCol := batch.ColVec(1).Int64()
@@ -189,12 +191,12 @@ func BenchmarkCompareSpecializedOperators(b *testing.B) {
 	defaultOp := &defaultBuiltinFuncOperator{
 		OneInputNode:        NewOneInputNode(source),
 		allocator:           testAllocator,
-		evalCtx:             tctx,
+		evalCtx:             evalCtx,
 		funcExpr:            typedExpr.(*tree.FuncExpr),
 		outputIdx:           outputIdx,
 		columnTypes:         typs,
 		outputType:          types.String,
-		toDatumConverter:    newVecToDatumConverter(len(typs), inputCols),
+		toDatumConverter:    colconv.NewVecToDatumConverter(len(typs), inputCols),
 		datumToVecConverter: GetDatumToPhysicalFn(types.String),
 		row:                 make(tree.Datums, outputIdx),
 		argumentCols:        inputCols,

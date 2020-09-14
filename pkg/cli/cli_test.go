@@ -101,9 +101,6 @@ func createTestCerts(certsDir string) (cleanup func() error) {
 		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootCert),
 		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedRootKey),
 
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedTenantServerCACert),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedTenantServerCert),
-		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedTenantServerKey),
 		filepath.Join(security.EmbeddedCertsDir, security.EmbeddedTenantClientCACert),
 	}
 
@@ -310,7 +307,7 @@ func isSQLCommand(args []string) bool {
 	case "sql", "dump", "workload", "nodelocal", "userfile", "statement-diag":
 		return true
 	case "node":
-		if len(args) == 0 {
+		if len(args) == 1 {
 			return false
 		}
 		switch args[1] {
@@ -319,6 +316,11 @@ func isSQLCommand(args []string) bool {
 		default:
 			return false
 		}
+	case "debug":
+		if len(args) < 3 {
+			return false
+		}
+		return args[1] == "doctor" && args[2] == "cluster"
 	default:
 		return false
 	}
@@ -1372,15 +1374,16 @@ func Example_misc_table() {
 	//     hai
 	// (1 row)
 	// sql --format=table -e explain select s, 'foo' from t.t
-	//     tree    |    field     | description
-	// ------------+--------------+--------------
-	//             | distribution | full
-	//             | vectorized   | false
-	//   render    |              |
-	//    └── scan |              |
-	//             | table        | t@primary
-	//             | spans        | FULL SCAN
-	// (6 rows)
+	//     tree    |     field     | description
+	// ------------+---------------+--------------
+	//             | distribution  | full
+	//             | vectorized    | false
+	//   render    |               |
+	//    └── scan |               |
+	//             | missing stats |
+	//             | table         | t@primary
+	//             | spans         | FULL SCAN
+	// (7 rows)
 }
 
 func Example_cert() {
@@ -1420,7 +1423,6 @@ Available Commands:
   statement-diag    commands for managing statement diagnostics bundles
   auth-session      log in and out of HTTP sessions
   node              list, inspect, drain or remove nodes
-  dump              dump sql tables
 
   nodelocal         upload and delete nodelocal files
   userfile          upload, list and delete user scoped files
@@ -1429,7 +1431,7 @@ Available Commands:
   version           output version information
   debug             debugging commands
   sqlfmt            format SQL statements
-  workload          [experimental] generators for data and query loads
+  workload          generators for data and query loads
   systembench       Run systembench
   help              Help about any command
 

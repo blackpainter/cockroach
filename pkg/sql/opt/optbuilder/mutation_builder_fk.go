@@ -653,7 +653,6 @@ func (h *fkCheckHelper) buildOtherTableScan() (outScope *scope, tabMeta *opt.Tab
 		h.otherTabOrdinals,
 		&tree.IndexFlags{IgnoreForeignKeys: true},
 		noRowLocking,
-		excludeMutations,
 		h.mb.b.allocScope(),
 	), otherTabMeta
 }
@@ -755,9 +754,11 @@ func (h *fkCheckHelper) buildInsertionCheck() memo.FKChecksItem {
 			),
 		)
 	}
-	antiJoin := f.ConstructAntiJoin(
-		fkInput, scanScope.expr, antiJoinFilters, &memo.JoinPrivate{},
-	)
+	var p memo.JoinPrivate
+	if h.mb.b.evalCtx.SessionData.PreferLookupJoinsForFKs {
+		p.Flags = memo.PreferLookupJoinIntoRight
+	}
+	antiJoin := f.ConstructAntiJoin(fkInput, scanScope.expr, antiJoinFilters, &p)
 
 	return f.ConstructFKChecksItem(antiJoin, &memo.FKChecksItemPrivate{
 		OriginTable:     h.mb.tabID,
@@ -795,9 +796,11 @@ func (h *fkCheckHelper) buildDeletionCheck(
 			),
 		)
 	}
-	semiJoin := f.ConstructSemiJoin(
-		deletedRows, scanScope.expr, semiJoinFilters, &memo.JoinPrivate{},
-	)
+	var p memo.JoinPrivate
+	if h.mb.b.evalCtx.SessionData.PreferLookupJoinsForFKs {
+		p.Flags = memo.PreferLookupJoinIntoRight
+	}
+	semiJoin := f.ConstructSemiJoin(deletedRows, scanScope.expr, semiJoinFilters, &p)
 
 	return f.ConstructFKChecksItem(semiJoin, &memo.FKChecksItemPrivate{
 		OriginTable:     origTabMeta.MetaID,

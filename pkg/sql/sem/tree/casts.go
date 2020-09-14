@@ -109,6 +109,13 @@ var validCasts = []castInfo{
 	{from: types.DateFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
 	{from: types.IntervalFamily, to: types.FloatFamily, volatility: VolatilityImmutable},
 
+	// Casts to Box2D Family.
+	{from: types.UnknownFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
+	{from: types.StringFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
+	{from: types.CollatedStringFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
+	{from: types.GeometryFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
+	{from: types.Box2DFamily, to: types.Box2DFamily, volatility: VolatilityImmutable},
+
 	// Casts to GeographyFamily.
 	{from: types.UnknownFamily, to: types.GeographyFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.GeographyFamily, volatility: VolatilityImmutable},
@@ -120,6 +127,7 @@ var validCasts = []castInfo{
 
 	// Casts to GeometryFamily.
 	{from: types.UnknownFamily, to: types.GeometryFamily, volatility: VolatilityImmutable},
+	{from: types.Box2DFamily, to: types.GeometryFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.GeometryFamily, volatility: VolatilityImmutable},
 	{from: types.JsonFamily, to: types.GeometryFamily, volatility: VolatilityImmutable},
 	{from: types.StringFamily, to: types.GeometryFamily, volatility: VolatilityImmutable},
@@ -152,6 +160,7 @@ var validCasts = []castInfo{
 	{from: types.ArrayFamily, to: types.StringFamily, volatility: VolatilityStable},
 	{from: types.TupleFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.GeometryFamily, to: types.StringFamily, volatility: VolatilityImmutable},
+	{from: types.Box2DFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.GeographyFamily, to: types.StringFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.StringFamily, volatility: VolatilityStable},
 	{from: types.TimestampFamily, to: types.StringFamily, volatility: VolatilityImmutable},
@@ -177,6 +186,7 @@ var validCasts = []castInfo{
 	{from: types.BitFamily, to: types.CollatedStringFamily, volatility: VolatilityImmutable},
 	{from: types.ArrayFamily, to: types.CollatedStringFamily, volatility: VolatilityStable},
 	{from: types.TupleFamily, to: types.CollatedStringFamily, volatility: VolatilityImmutable},
+	{from: types.Box2DFamily, to: types.CollatedStringFamily, volatility: VolatilityImmutable},
 	{from: types.GeometryFamily, to: types.CollatedStringFamily, volatility: VolatilityImmutable},
 	{from: types.GeographyFamily, to: types.CollatedStringFamily, volatility: VolatilityImmutable},
 	{from: types.BytesFamily, to: types.CollatedStringFamily, volatility: VolatilityStable},
@@ -318,6 +328,7 @@ func init() {
 
 // lookupCast returns the information for a valid cast.
 // Returns nil if this is not a valid cast.
+// Does not handle array and tuple casts.
 func lookupCast(from, to types.Family) *castInfo {
 	return castsMap[castsMapKey{from: from, to: to}]
 }
@@ -329,6 +340,25 @@ func LookupCastVolatility(from, to *types.T) (_ Volatility, ok bool) {
 	// Special case for casting between arrays.
 	if fromFamily == types.ArrayFamily && toFamily == types.ArrayFamily {
 		return LookupCastVolatility(from.ArrayContents(), to.ArrayContents())
+	}
+	// Special case for casting between tuples.
+	if fromFamily == types.TupleFamily && toFamily == types.TupleFamily {
+		fromTypes := from.TupleContents()
+		toTypes := to.TupleContents()
+		if len(fromTypes) != len(toTypes) {
+			return 0, false
+		}
+		maxVolatility := VolatilityLeakProof
+		for i := range fromTypes {
+			v, ok := LookupCastVolatility(fromTypes[i], toTypes[i])
+			if !ok {
+				return 0, false
+			}
+			if v > maxVolatility {
+				maxVolatility = v
+			}
+		}
+		return maxVolatility, true
 	}
 	cast := lookupCast(fromFamily, toFamily)
 	if cast == nil {
@@ -589,7 +619,7 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 				ctx.SessionData.DataConversion.GetFloatPrec(), 64)
 		case *DBool, *DInt, *DDecimal:
 			s = d.String()
-		case *DTimestamp, *DDate, *DTime, *DTimeTZ, *DGeography, *DGeometry:
+		case *DTimestamp, *DDate, *DTime, *DTimeTZ, *DGeography, *DGeometry, *DBox2D:
 			s = AsStringWithFlags(d, FmtBareStrings)
 		case *DTimestampTZ:
 			// Convert to context timezone for correct display.
@@ -696,6 +726,22 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 			return d, nil
 		}
 
+	case types.Box2DFamily:
+		switch d := d.(type) {
+		case *DString:
+			return ParseDBox2D(string(*d))
+		case *DCollatedString:
+			return ParseDBox2D(d.Contents)
+		case *DBox2D:
+			return d, nil
+		case *DGeometry:
+			bbox := d.CartesianBoundingBox()
+			if bbox == nil {
+				return DNull, nil
+			}
+			return NewDBox2D(*bbox), nil
+		}
+
 	case types.GeographyFamily:
 		switch d := d.(type) {
 		case *DString:
@@ -703,8 +749,8 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 		case *DCollatedString:
 			return ParseDGeography(d.Contents)
 		case *DGeography:
-			if err := geo.GeospatialTypeFitsColumnMetadata(
-				d.Geography,
+			if err := geo.SpatialObjectFitsColumnMetadata(
+				d.Geography.SpatialObject(),
 				t.InternalType.GeoMetadata.SRID,
 				t.InternalType.GeoMetadata.ShapeType,
 			); err != nil {
@@ -716,8 +762,8 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := geo.GeospatialTypeFitsColumnMetadata(
-				g,
+			if err := geo.SpatialObjectFitsColumnMetadata(
+				g.SpatialObject(),
 				t.InternalType.GeoMetadata.SRID,
 				t.InternalType.GeoMetadata.ShapeType,
 			); err != nil {
@@ -748,8 +794,8 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 		case *DCollatedString:
 			return ParseDGeometry(d.Contents)
 		case *DGeometry:
-			if err := geo.GeospatialTypeFitsColumnMetadata(
-				d.Geometry,
+			if err := geo.SpatialObjectFitsColumnMetadata(
+				d.Geometry.SpatialObject(),
 				t.InternalType.GeoMetadata.SRID,
 				t.InternalType.GeoMetadata.ShapeType,
 			); err != nil {
@@ -757,8 +803,8 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 			}
 			return d, nil
 		case *DGeography:
-			if err := geo.GeospatialTypeFitsColumnMetadata(
-				d.Geography,
+			if err := geo.SpatialObjectFitsColumnMetadata(
+				d.Geography.SpatialObject(),
 				t.InternalType.GeoMetadata.SRID,
 				t.InternalType.GeoMetadata.ShapeType,
 			); err != nil {
@@ -775,6 +821,12 @@ func PerformCast(ctx *EvalContext, d Datum, t *types.T) (Datum, error) {
 				return nil, err
 			}
 			g, err := geo.ParseGeometryFromGeoJSON([]byte(*t))
+			if err != nil {
+				return nil, err
+			}
+			return &DGeometry{g}, nil
+		case *DBox2D:
+			g, err := geo.MakeGeometryFromGeomT(d.ToGeomT(geopb.DefaultGeometrySRID))
 			if err != nil {
 				return nil, err
 			}

@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
@@ -38,13 +39,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/jackc/pgx"
 	"github.com/lib/pq"
 	"github.com/pmezard/go-difflib/difflib"
@@ -63,32 +64,31 @@ INSERT INTO sensitive(super, sensible) VALUES('that', 'nobody', 'must', 'see')
 		t.Fatal(err)
 	}
 
-	rUnsafe := errors.New("panic: i'm not safe")
+	rUnsafe := errors.New("some error")
 	safeErr := sql.WithAnonymizedStatement(rUnsafe, stmt1.AST)
 
-	const expMessage = "panic: i'm not safe"
+	const expMessage = "some error"
 	actMessage := safeErr.Error()
 	if actMessage != expMessage {
 		t.Errorf("wanted: %s\ngot: %s", expMessage, actMessage)
 	}
 
-	const expSafeRedactedMessage = `...conn_executor_test.go:NN: <*errors.errorString>
-wrapper: <*withstack.withStack>
-(more details:)
-github.com/cockroachdb/cockroach/pkg/sql_test.TestAnonymizeStatementsForReporting
-	...conn_executor_test.go:NN
-testing.tRunner
-	...testing.go:NN
-runtime.goexit
-	...asm_amd64.s:NN
-wrapper: <*safedetails.withSafeDetails>
-(more details:)
-while executing: %s
--- arg 1: INSERT INTO _(_, _) VALUES (_, _, __more2__)`
+	const expSafeRedactedMessage = `some error
+(1) while executing: INSERT INTO _(_, _) VALUES (_, _, __more2__)
+Wraps: (2) attached stack trace
+  -- stack trace:
+  | github.com/cockroachdb/cockroach/pkg/sql_test.TestAnonymizeStatementsForReporting
+  | 	...conn_executor_test.go:NN
+  | testing.tRunner
+  | 	...testing.go:NN
+  | runtime.goexit
+  | 	...asm_amd64.s:NN
+Wraps: (3) some error
+Error types: (1) *safedetails.withSafeDetails (2) *withstack.withStack (3) *errutil.leafError`
 
 	// Edit non-determinstic stack trace filenames from the message.
 	actSafeRedactedMessage := fileref.ReplaceAllString(
-		errors.Redact(safeErr), "...$2:NN")
+		redact.Sprintf("%+v", safeErr).Redact().StripMarkers(), "...$2:NN")
 
 	if actSafeRedactedMessage != expSafeRedactedMessage {
 		diff, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
@@ -496,8 +496,6 @@ func TestQueryProgress(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.WithIssue(t, 51356)
-
 	const rows, kvBatchSize = 1000, 50
 
 	defer rowexec.TestingSetScannedRowProgressFrequency(rows / 60)()
@@ -550,7 +548,13 @@ func TestQueryProgress(t *testing.T) {
 	db.Exec(t, `CREATE STATISTICS __auto__ FROM t.test`)
 	const query = `SELECT count(*) FROM t.test WHERE x > $1 and x % 2 = 0`
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Invalidate the stats cache so that we can be sure to get the latest stats.
+	var tableID descpb.ID
+	ctx := context.Background()
+	require.NoError(t, rawDB.QueryRow(`SELECT id FROM system.namespace WHERE name = 'test'`).Scan(&tableID))
+	s.ExecutorConfig().(sql.ExecutorConfig).TableStatsCache.InvalidateTableStats(ctx, tableID)
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	g := ctxgroup.WithContext(ctx)

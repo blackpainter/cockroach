@@ -19,6 +19,9 @@ import (
 // IndexOrdinal identifies an index (in the context of a Table).
 type IndexOrdinal = int
 
+// IndexOrdinals identifies a list of indexes (in the context of a Table).
+type IndexOrdinals = []IndexOrdinal
+
 // PrimaryIndex selects the primary index of a table when calling the
 // Table.Index method. Every table is guaranteed to have a unique primary
 // index, even if it meant adding a hidden unique rowid column.
@@ -226,11 +229,7 @@ type Index interface {
 type IndexColumn struct {
 	// Column is a reference to the column returned by Table.Column, given the
 	// column ordinal.
-	Column
-
-	// Ordinal is the ordinal position of the indexed column in the table being
-	// indexed. It is always >= 0 and < Table.ColumnCount.
-	Ordinal int
+	*Column
 
 	// Descending is true if the index is ordered from greatest to least on
 	// this column, rather than least to greatest.

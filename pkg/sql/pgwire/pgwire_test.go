@@ -41,8 +41,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
+	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgproto3"
 	"github.com/lib/pq"
 )
 
@@ -553,7 +553,7 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.Results("users", "primary", false, 1, "username", "ASC", false, false),
 		}},
 		{"SHOW TABLES FROM system", []preparedQueryTest{
-			baseTest.Results("public", "comments", "table", gosql.NullString{}).Others(27),
+			baseTest.Results("public", "comments", "table", gosql.NullString{}).Others(28),
 		}},
 		{"SHOW SCHEMAS FROM system", []preparedQueryTest{
 			baseTest.Results("crdb_internal").Others(4),
@@ -573,8 +573,10 @@ func TestPGPreparedQuery(t *testing.T) {
 			baseTest.SetArgs("woo", "waa"),
 		}},
 		{"SHOW USERS", []preparedQueryTest{
-			baseTest.Results("abc", "", "{}").Results("admin", "CREATEROLE", "{}").
-				Results("root", "CREATEROLE", "{admin}").Results("woo", "", "{}"),
+			baseTest.Results("abc", "", "{}").
+				Results("admin", "", "{}").
+				Results("root", "", "{admin}").
+				Results("woo", "", "{}"),
 		}},
 		{"DROP USER $1", []preparedQueryTest{
 			baseTest.SetArgs("abc"),
@@ -756,6 +758,9 @@ func TestPGPreparedQuery(t *testing.T) {
 		}},
 		{"SELECT $1::TIMETZ", []preparedQueryTest{
 			baseTest.SetArgs("12:00:00+0330").Results("0000-01-01T12:00:00+03:30"),
+		}},
+		{"SELECT $1::BOX2D", []preparedQueryTest{
+			baseTest.SetArgs("BOX(1 2,3 4)").Results("BOX(1 2,3 4)"),
 		}},
 		{"SELECT $1::GEOGRAPHY", []preparedQueryTest{
 			baseTest.SetArgs("POINT(1.0 1.0)").Results("0101000020E6100000000000000000F03F000000000000F03F"),
@@ -1898,10 +1903,7 @@ func TestCancelRequest(t *testing.T) {
 		// Reset telemetry so we get a deterministic count below.
 		_ = telemetry.GetFeatureCounts(telemetry.Raw, telemetry.ResetCounts)
 
-		fe, err := pgproto3.NewFrontend(conn, conn)
-		if err != nil {
-			t.Fatal(err)
-		}
+		fe := pgproto3.NewFrontend(pgproto3.NewChunkReader(conn), conn)
 		// versionCancel is the special code sent as header for cancel requests.
 		// See: https://www.postgresql.org/docs/current/protocol-message-formats.html
 		// and the explanation in server.go.
@@ -1909,7 +1911,7 @@ func TestCancelRequest(t *testing.T) {
 		if err := fe.Send(&pgproto3.StartupMessage{ProtocolVersion: versionCancel}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fe.Receive(); err != io.EOF {
+		if _, err := fe.Receive(); !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("unexpected: %v", err)
 		}
 		if count := telemetry.GetRawFeatureCounts()["pgwire.unimplemented.cancel_request"]; count != 1 {

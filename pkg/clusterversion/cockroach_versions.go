@@ -74,6 +74,14 @@ const (
 	VersionRangeStatsRespHasDesc
 	VersionMinPasswordLength
 	VersionAbortSpanBytes
+	VersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable
+	VersionMaterializedViews
+	VersionBox2DType
+	VersionLeasedDatabaseDescriptors
+	VersionUpdateScheduledJobsSchema
+	VersionCreateLoginPrivilege
+	VersionHBAForNonTLS
+
 	// Add new versions here (step one of two).
 )
 
@@ -558,8 +566,48 @@ var versionsSingleton = keyedVersions([]keyedVersion{
 		Key:     VersionAbortSpanBytes,
 		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 14},
 	},
-	// Add new versions here (step two of two).
+	{
+		// VersionAlterSystemJobsTableAddLeaseColumn is a version which modified system.jobs table.
+		Key:     VersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 15},
+	},
+	{
+		// VersionMaterializedViews enables the use of materialized views.
+		Key:     VersionMaterializedViews,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 16},
+	},
+	{
+		// VersionBox2DType enables the use of the box2d type.
+		Key:     VersionBox2DType,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 17},
+	},
+	{
+		// VersionLeasedDatabasedDescriptors enables leased database descriptors.
+		Key:     VersionLeasedDatabaseDescriptors,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 18},
+	},
+	{
+		// VersionUpdateScheduledJobsSchema drops schedule_changes and adds schedule_status.
+		Key:     VersionUpdateScheduledJobsSchema,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 19},
+	},
+	{
+		// VersionCreateLoginPrivilege is when CREATELOGIN/NOCREATELOGIN
+		// are introduced.
+		//
+		// It represents adding authn principal management via CREATELOGIN
+		// role option.
+		Key:     VersionCreateLoginPrivilege,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 20},
+	},
+	{
+		// VersionHBAForNonTLS is when the 'hostssl' and 'hostnossl' HBA
+		// configs are introduced.
+		Key:     VersionHBAForNonTLS,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 21},
+	},
 
+	// Add new versions here (step two of two).
 })
 
 // TODO(irfansharif): clusterversion.binary{,MinimumSupported}Version
@@ -570,6 +618,7 @@ var (
 	// this binary. If this binary is started using a store marked with an older
 	// version than binaryMinSupportedVersion, then the binary will exit with
 	// an error.
+	//
 	// We support everything after 19.1, including pre-release 19.2 versions.
 	// This is generally beneficial, but in particular it allows the
 	// version-upgrade roachtest to use a pre-release 19.2 binary before upgrading

@@ -14,11 +14,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 // optTableUpserter implements the upsert operation when it is planned by the
@@ -109,19 +110,14 @@ func (tu *optTableUpserter) init(
 		tu.resultRow = make(tree.Datums, len(tu.returnCols))
 		tu.rowsUpserted = rowcontainer.NewRowContainer(
 			evalCtx.Mon.MakeBoundAccount(),
-			sqlbase.ColTypeInfoFromColDescs(tu.returnCols),
-			0, /* rowCapacity */
+			colinfo.ColTypeInfoFromColDescs(tu.returnCols),
 		)
 
 		// Create the map from colIds to the expected columns.
 		// Note that this map will *not* contain any mutation columns - that's
 		// because even though we might insert values into mutation columns, we
 		// never return them back to the user.
-		tu.colIDToReturnIndex = map[descpb.ColumnID]int{}
-		for i := range tu.tableDesc().Columns {
-			id := tu.tableDesc().Columns[i].ID
-			tu.colIDToReturnIndex[id] = i
-		}
+		tu.colIDToReturnIndex = tu.tableDesc().ColumnIdxMapWithMutations(false /* includeMutations */)
 
 		if len(tu.ri.InsertColIDtoRowIndex) == len(tu.colIDToReturnIndex) {
 			for colID, insertIndex := range tu.ri.InsertColIDtoRowIndex {
@@ -228,7 +224,6 @@ func (tu *optTableUpserter) row(
 		row[insertEnd:fetchEnd],
 		row[fetchEnd:updateEnd],
 		pm,
-		tu.tableDesc(),
 		traceKV,
 	)
 }
@@ -290,7 +285,6 @@ func (tu *optTableUpserter) updateConflictingRow(
 	fetchRow tree.Datums,
 	updateValues tree.Datums,
 	pm row.PartialIndexUpdateHelper,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
 	traceKV bool,
 ) error {
 	// Enforce the column constraints.
@@ -346,7 +340,7 @@ func (tu *optTableUpserter) updateConflictingRow(
 }
 
 // tableDesc is part of the tableWriter interface.
-func (tu *optTableUpserter) tableDesc() *sqlbase.ImmutableTableDescriptor {
+func (tu *optTableUpserter) tableDesc() catalog.TableDescriptor {
 	return tu.ri.Helper.TableDesc
 }
 

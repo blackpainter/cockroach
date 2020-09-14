@@ -63,6 +63,12 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 	md := scan.Memo().Metadata()
 	hardLimit := scan.HardLimit.RowCount()
 
+	isPartialIndexScan := scan.UsesPartialIndex(md)
+	var pred FiltersExpr
+	if isPartialIndexScan {
+		pred = scan.PartialIndexPredicate(md)
+	}
+
 	// Side Effects
 	// ------------
 	// A Locking option is a side-effect (we don't want to elide this scan).
@@ -79,8 +85,14 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 	// ----------------
 	// Initialize not-NULL columns from the table schema.
 	rel.NotNullCols = tableNotNullCols(md, scan.Table)
+	// Union not-NULL columns with not-NULL columns in the constraint.
 	if scan.Constraint != nil {
 		rel.NotNullCols.UnionWith(scan.Constraint.ExtractNotNullCols(b.evalCtx))
+	}
+	// Union not-NULL columns with not-NULL columns in the partial index
+	// predicate.
+	if isPartialIndexScan {
+		rel.NotNullCols.UnionWith(b.rejectNullCols(pred))
 	}
 	rel.NotNullCols.IntersectionWith(rel.OutputCols)
 
@@ -105,13 +117,37 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 		if tabMeta := md.TableMeta(scan.Table); tabMeta.Constraints != nil {
 			b.addFiltersToFuncDep(*tabMeta.Constraints.(*FiltersExpr), &rel.FuncDeps)
 		}
+		if isPartialIndexScan {
+			b.addFiltersToFuncDep(pred, &rel.FuncDeps)
+
+			// Partial index keys are not added to the functional dependencies in
+			// MakeTableFuncDep, because they do not apply to the entire table. They are
+			// added here if the scan uses a partial index.
+			index := md.Table(scan.Table).Index(scan.Index)
+			var keyCols opt.ColSet
+			for col := 0; col < index.LaxKeyColumnCount(); col++ {
+				ord := index.Column(col).Ordinal()
+				keyCols.Add(scan.Table.ColumnID(ord))
+			}
+			allCols := keyCols.Union(rel.OutputCols)
+
+			// If index has a separate lax key, add a lax key FD. Otherwise, add a
+			// strict key. See the comment for cat.Index.LaxKeyColumnCount.
+			if index.LaxKeyColumnCount() < index.KeyColumnCount() {
+				// This case only occurs for a UNIQUE index having a NULL-able column.
+				rel.FuncDeps.AddLaxKey(keyCols, allCols)
+			} else {
+				rel.FuncDeps.AddStrictKey(keyCols, allCols)
+			}
+		}
 		rel.FuncDeps.MakeNotNull(rel.NotNullCols)
 		rel.FuncDeps.ProjectCols(rel.OutputCols)
 	}
 
 	// Cardinality
 	// -----------
-	// Restrict cardinality based on constraint, FDs, and hard limit.
+	// Restrict cardinality based on constraint, partial index predicate, FDs,
+	// and hard limit.
 	rel.Cardinality = props.AnyCardinality
 	if scan.Constraint != nil && scan.Constraint.IsContradiction() {
 		rel.Cardinality = props.ZeroCardinality
@@ -123,6 +159,9 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 		}
 		if scan.Constraint != nil {
 			b.updateCardinalityFromConstraint(scan.Constraint, rel)
+		}
+		if isPartialIndexScan {
+			b.updateCardinalityFromFilters(pred, rel)
 		}
 	}
 
@@ -276,7 +315,7 @@ func (b *logicalPropsBuilder) buildInvertedFilterProps(
 	// Output Columns
 	// --------------
 	// Inherit output columns from input, but remove the inverted column.
-	rel.OutputCols = inputProps.OutputCols
+	rel.OutputCols = inputProps.OutputCols.Copy()
 	rel.OutputCols.Remove(invFilter.InvertedColumn)
 
 	// Not Null Columns
@@ -1572,6 +1611,13 @@ func MakeTableFuncDep(md *opt.Metadata, tabID opt.TableID) *props.FuncDepSet {
 	for i := 0; i < tab.ColumnCount(); i++ {
 		allCols.Add(tabID.ColumnID(i))
 	}
+	var excludeColumn opt.ColumnID
+	if tab.IsVirtualTable() {
+		// Don't advertise any functional dependencies for virtual table primary
+		// keys, since they are composed of a fake, unusable column.
+		dummyPKOrd := tab.Index(cat.PrimaryIndex).Column(0).Ordinal()
+		excludeColumn = tabID.ColumnID(dummyPKOrd)
+	}
 
 	fd = &props.FuncDepSet{}
 	for i := 0; i < tab.IndexCount(); i++ {
@@ -1582,18 +1628,26 @@ func MakeTableFuncDep(md *opt.Metadata, tabID opt.TableID) *props.FuncDepSet {
 			// Skip inverted indexes for now.
 			continue
 		}
-		if tab.IsVirtualTable() && i == cat.PrimaryIndex {
-			// Don't advertise any functional dependencies for virtual table primary
-			// keys, since they are composed of a fake, unusable column.
+
+		if _, isPartial := index.Predicate(); isPartial {
+			// Partial indexes cannot be considered while building functional
+			// dependency keys for the table because their keys are only unique
+			// for a subset of the rows in the table.
 			continue
 		}
 
 		// If index has a separate lax key, add a lax key FD. Otherwise, add a
 		// strict key. See the comment for cat.Index.LaxKeyColumnCount.
 		for col := 0; col < index.LaxKeyColumnCount(); col++ {
-			ord := index.Column(col).Ordinal
+			ord := index.Column(col).Ordinal()
 			keyCols.Add(tabID.ColumnID(ord))
 		}
+
+		if excludeColumn != 0 && keyCols.Contains(excludeColumn) {
+			// See comment above where excludeColumn is set.
+			continue
+		}
+
 		if index.LaxKeyColumnCount() < index.KeyColumnCount() {
 			// This case only occurs for a UNIQUE index having a NULL-able column.
 			fd.AddLaxKey(keyCols, allCols)
@@ -1722,8 +1776,8 @@ func (b *logicalPropsBuilder) updateCardinalityFromConstraint(
 		return
 	}
 
-	count := c.CalculateMaxResults(b.evalCtx, cols, rel.NotNullCols)
-	if count != 0 && count < math.MaxUint32 {
+	count, ok := c.CalculateMaxResults(b.evalCtx, cols, rel.NotNullCols)
+	if ok && count < math.MaxUint32 {
 		rel.Cardinality = rel.Cardinality.Limit(uint32(count))
 	}
 }
@@ -1739,7 +1793,7 @@ func ensureLookupJoinInputProps(join *LookupJoinExpr, sb *statisticsBuilder) *pr
 		// Include the key columns in the output columns.
 		index := md.Table(join.Table).Index(join.Index)
 		for i := range join.KeyCols {
-			indexColID := join.Table.ColumnID(index.Column(i).Ordinal)
+			indexColID := join.Table.ColumnID(index.Column(i).Ordinal())
 			relational.OutputCols.Add(indexColID)
 		}
 
@@ -1826,9 +1880,10 @@ func tableNotNullCols(md *opt.Metadata, tabID opt.TableID) opt.ColSet {
 
 	// Only iterate over non-mutation columns, since even non-null mutation
 	// columns can be null during backfill.
-	for i := 0; i < tab.ColumnCount(); i++ {
+	for i, n := 0, tab.ColumnCount(); i < n; i++ {
+		col := tab.Column(i)
 		// Non-null mutation columns can be null during backfill.
-		if !cat.IsMutationColumn(tab, i) && !tab.Column(i).IsNullable() {
+		if !col.IsMutation() && !col.IsNullable() {
 			cs.Add(tabID.ColumnID(i))
 		}
 	}
@@ -1879,7 +1934,7 @@ func (h *joinPropsHelper) init(b *logicalPropsBuilder, joinExpr RelExpr) {
 		md := join.Memo().Metadata()
 		index := md.Table(join.Table).Index(join.Index)
 		for i, colID := range join.KeyCols {
-			indexColID := join.Table.ColumnID(index.Column(i).Ordinal)
+			indexColID := join.Table.ColumnID(index.Column(i).Ordinal())
 			h.filterNotNullCols.Add(colID)
 			h.filterNotNullCols.Add(indexColID)
 			h.filtersFD.AddEquivalency(colID, indexColID)

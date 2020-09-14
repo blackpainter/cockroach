@@ -78,7 +78,8 @@ func (r *Replica) executeWriteBatch(
 	// at proposal time, not at application time, because the spanlatch manager
 	// will synchronize all requests (notably EndTxn with SplitTrigger) that may
 	// cause this condition to change.
-	if err := r.checkExecutionCanProceed(ctx, ba, g, &st); err != nil {
+	mergeInProgress, err := r.checkExecutionCanProceed(ctx, ba, g, &st)
+	if err != nil {
 		return nil, g, roachpb.NewError(err)
 	}
 
@@ -148,7 +149,7 @@ func (r *Replica) executeWriteBatch(
 	// cannot communicate under the lease's epoch. Instead the code calls EmitMLAI
 	// explicitly as a side effect of stepping up as leaseholder.
 	if maxLeaseIndex != 0 {
-		if r.mergeInProgress() {
+		if mergeInProgress {
 			// The correctness of range merges relies on the invariant that the
 			// LeaseAppliedIndex of the range is not bumped while a range is in its
 			// subsumed state. If this invariant is ever violated, the follower
@@ -157,7 +158,8 @@ func (r *Replica) executeWriteBatch(
 			// a serializability violation.
 			//
 			// See comment block in Subsume() in cmd_subsume.go for details.
-			log.Fatalf(ctx, "lease applied index bumped while the range was subsumed")
+			log.Fatalf(ctx,
+				"lease applied index bumped by %v while the range was subsumed", ba)
 		}
 		untrack(ctx, ctpb.Epoch(st.Lease.Epoch), r.RangeID, ctpb.LAI(maxLeaseIndex))
 	}
@@ -425,11 +427,10 @@ func (r *Replica) evaluate1PC(
 
 	arg, _ := ba.GetArg(roachpb.EndTxn)
 	etArg := arg.(*roachpb.EndTxnRequest)
-	canFwdTimestamp := batcheval.CanForwardCommitTimestampWithoutRefresh(ba.Txn, etArg)
 
 	// Evaluate strippedBa. If the transaction allows, permit refreshes.
 	ms := new(enginepb.MVCCStats)
-	if canFwdTimestamp {
+	if ba.CanForwardReadTimestamp {
 		batch, br, res, pErr = r.evaluateWriteBatchWithServersideRefreshes(
 			ctx, idKey, rec, ms, &strippedBa, latchSpans, etArg.Deadline)
 	} else {
@@ -437,7 +438,7 @@ func (r *Replica) evaluate1PC(
 			ctx, idKey, rec, ms, &strippedBa, latchSpans)
 	}
 
-	if pErr != nil || (!canFwdTimestamp && ba.Timestamp != br.Timestamp) {
+	if pErr != nil || (!ba.CanForwardReadTimestamp && ba.Timestamp != br.Timestamp) {
 		if pErr != nil {
 			log.VEventf(ctx, 2,
 				"1PC execution failed, falling back to transactional execution. pErr: %v", pErr.String())

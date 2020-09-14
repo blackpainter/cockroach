@@ -24,10 +24,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations/leasemanager"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -541,7 +545,7 @@ func TestCreateSystemTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	table := sqlbase.NewMutableExistingTableDescriptor(sqlbase.NamespaceTable.TableDescriptor)
+	table := tabledesc.NewExistingMutable(systemschema.NamespaceTable.TableDescriptor)
 	table.ID = keys.MaxReservedDescID
 
 	prevPrivileges, ok := descpb.SystemAllowedPrivileges[table.ID]
@@ -556,8 +560,8 @@ func TestCreateSystemTable(t *testing.T) {
 	descpb.SystemAllowedPrivileges[table.ID] = descpb.SystemAllowedPrivileges[keys.NamespaceTableID]
 
 	table.Name = "dummy"
-	nameKey := sqlbase.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
-	descKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
+	nameKey := catalogkeys.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
+	descKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
 	descVal := table.DescriptorProto()
 
 	mt := makeMigrationTest(ctx, t)
@@ -775,10 +779,10 @@ func TestMigrateNamespaceTableDescriptors(t *testing.T) {
 
 	// Since we're already on 20.1, mimic the beginning state by deleting the
 	// new namespace descriptor.
-	key := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.NamespaceTableID)
+	key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.NamespaceTableID)
 	require.NoError(t, mt.kvDB.Del(ctx, key))
 
-	deprecatedKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.DeprecatedNamespaceTableID)
+	deprecatedKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.DeprecatedNamespaceTableID)
 	desc := &descpb.Descriptor{}
 	require.NoError(t, mt.kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		_, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
@@ -794,18 +798,18 @@ func TestMigrateNamespaceTableDescriptors(t *testing.T) {
 		{
 			ts, err := txn.GetProtoTs(ctx, key, desc)
 			require.NoError(t, err)
-			table := sqlbase.TableFromDescriptor(desc, ts)
-			table.CreateAsOfTime = sqlbase.NamespaceTable.CreateAsOfTime
-			table.ModificationTime = sqlbase.NamespaceTable.ModificationTime
-			require.True(t, table.Equal(sqlbase.NamespaceTable.TableDesc()))
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.NamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.NamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.NamespaceTable.TableDesc()))
 		}
 		{
 			ts, err := txn.GetProtoTs(ctx, deprecatedKey, desc)
 			require.NoError(t, err)
-			table := sqlbase.TableFromDescriptor(desc, ts)
-			table.CreateAsOfTime = sqlbase.DeprecatedNamespaceTable.CreateAsOfTime
-			table.ModificationTime = sqlbase.DeprecatedNamespaceTable.ModificationTime
-			require.True(t, table.Equal(sqlbase.DeprecatedNamespaceTable.TableDesc()))
+			table := descpb.TableFromDescriptor(desc, ts)
+			table.CreateAsOfTime = systemschema.DeprecatedNamespaceTable.CreateAsOfTime
+			table.ModificationTime = systemschema.DeprecatedNamespaceTable.ModificationTime
+			require.True(t, table.Equal(systemschema.DeprecatedNamespaceTable.TableDesc()))
 		}
 		return nil
 	}))
@@ -836,7 +840,7 @@ CREATE TABLE system.jobs (
 		keys.SystemDatabaseID,
 		keys.JobsTableID,
 		oldJobsTableSchema,
-		sqlbase.JobsTable.Privileges,
+		systemschema.JobsTable.Privileges,
 	)
 	require.NoError(t, err)
 
@@ -851,17 +855,25 @@ CREATE TABLE system.jobs (
 	require.Equal(t, primaryFamilyName, oldJobsTable.Families[0].Name)
 	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
 
-	jobsTable := sqlbase.JobsTable
-	sqlbase.JobsTable = sqlbase.NewImmutableTableDescriptor(*oldJobsTable.TableDesc())
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
 	defer func() {
-		sqlbase.JobsTable = jobsTable
+		systemschema.JobsTable = jobsTable
 	}()
 
 	mt := makeMigrationTest(ctx, t)
 	defer mt.close(ctx)
 
-	migration := mt.pop(t, "add created_by columns to system.jobs")
-	mt.start(t, base.TestServerArgs{})
+	migration := mt.pop(t, "add new sqlliveness table and claim columns to system.jobs")
+	migration = mt.pop(t, "add created_by columns to system.jobs")
+	ver201 := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+
+	params, _ := tests.CreateTestServerParams()
+	params.Settings = ver201
+	mt.start(t, params)
 
 	// Run migration and verify we have added columns and renamed column family.
 	require.NoError(t, mt.runMigration(ctx, migration))
@@ -882,4 +894,87 @@ CREATE TABLE system.jobs (
 	newJobsTableAgain := catalogkv.TestingGetTableDescriptor(
 		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
 	require.True(t, proto.Equal(newJobsTable.TableDesc(), newJobsTableAgain.TableDesc()))
+}
+
+func TestVersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	// We need to use "old" jobs table descriptor without newly added columns
+	// in order to test migration.
+	// oldJobsTableSchema is system.jobs definition prior to 20.2
+
+	oldJobsTableSchema := `
+	CREATE TABLE system.jobs (
+		id                INT8      DEFAULT unique_rowid() PRIMARY KEY,
+		status            STRING    NOT NULL,
+		created           TIMESTAMP NOT NULL DEFAULT now(),
+		payload           BYTES     NOT NULL,
+		progress          BYTES,
+		created_by_type   STRING,
+		created_by_id     INT,
+		INDEX (status, created),
+		INDEX (created_by_type, created_by_id) STORING (status),
+
+		FAMILY fam_0_id_status_created_payload (id, status, created, payload, created_by_type, created_by_id),
+		FAMILY progress (progress)
+	);`
+
+	oldJobsTable, err := sql.CreateTestTableDescriptor(
+		context.Background(),
+		keys.SystemDatabaseID,
+		keys.JobsTableID,
+		oldJobsTableSchema,
+		systemschema.JobsTable.Privileges,
+	)
+	require.NoError(t, err)
+
+	oldPrimaryFamilyColumns := []string{"id", "status", "created", "payload", "created_by_type", "created_by_id"}
+
+	// Sanity check oldJobsTable does not have new columns.
+	require.Equal(t, 7, len(oldJobsTable.Columns))
+	require.Equal(t, 2, len(oldJobsTable.Families))
+	require.Equal(t, oldPrimaryFamilyColumns, oldJobsTable.Families[0].ColumnNames)
+
+	jobsTable := systemschema.JobsTable
+	systemschema.JobsTable = tabledesc.NewImmutable(*oldJobsTable.TableDesc())
+	defer func() {
+		systemschema.JobsTable = jobsTable
+	}()
+
+	mt := makeMigrationTest(ctx, t)
+	defer mt.close(ctx)
+
+	migration := mt.pop(t, "add created_by columns to system.jobs")
+	migration = mt.pop(t, "add new sqlliveness table and claim columns to system.jobs")
+
+	ver201 := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+
+	params, _ := tests.CreateTestServerParams()
+	params.Settings = ver201
+	mt.start(t, params)
+
+	// Run migration and verify we have added columns and renamed column family.
+	require.NoError(t, mt.runMigration(ctx, migration))
+
+	newJobsTable := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.Equal(t, 9, len(newJobsTable.Columns))
+	require.Equal(t, "claim_session_id", newJobsTable.Columns[7].Name)
+	require.Equal(t, "claim_instance_id", newJobsTable.Columns[8].Name)
+	require.Equal(t, 3, len(newJobsTable.Families))
+	// Ensure we keep old family names.
+	require.Equal(t, "fam_0_id_status_created_payload", newJobsTable.Families[0].Name)
+	require.Equal(t, "progress", newJobsTable.Families[1].Name)
+	// ... and that the new one is here.
+	require.Equal(t, "claim", newJobsTable.Families[2].Name)
+
+	// Run the migration again -- it should be a no-op.
+	require.NoError(t, mt.runMigration(ctx, migration))
+	newJobsTableAgain := catalogkv.TestingGetTableDescriptor(
+		mt.kvDB, keys.SystemSQLCodec, "system", "jobs")
+	require.Equal(t, newJobsTable, newJobsTableAgain)
 }

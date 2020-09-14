@@ -1,8 +1,8 @@
 # Common helpers for teamcity-*.sh scripts.
 
 remove_files_on_exit() {
-  rm .google-credentials.json
-  rm .cockroach-teamcity-key
+  rm -f .google-credentials.json
+  rm -f .cockroach-teamcity-key
 }
 trap remove_files_on_exit EXIT
 
@@ -29,7 +29,7 @@ docker_login_with_google() {
 }
 
 docker_login() {
-  echo "${DOCKER_AUTH}" | docker login --username "${DOCKER_ID}" --password-stdin
+  echo "${DOCKER_ACCESS_TOKEN}" | docker login --username "${DOCKER_ID}" --password-stdin
 }
 
 configure_docker_creds() {

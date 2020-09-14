@@ -29,8 +29,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
@@ -55,6 +57,9 @@ type sqlConn struct {
 	url          string
 	conn         sqlConnI
 	reconnecting bool
+
+	// passwordMissing is true iff the url is missing a password.
+	passwordMissing bool
 
 	pendingNotices []*pq.Error
 
@@ -150,6 +155,26 @@ func (c *sqlConn) ensureConn() error {
 		// connections only once instead. The context is only used for dialing.
 		conn, err := connector.Connect(context.TODO())
 		if err != nil {
+			// Connection failed: if the failure is due to a mispresented
+			// password, we're going to fill the password here.
+			//
+			// TODO(knz): CockroachDB servers do not properly fill SQLSTATE
+			// (28P01) for password auth errors, so we have to "make do"
+			// with a string match. This should be cleaned up by adding
+			// the missing code server-side.
+			errStr := strings.TrimPrefix(err.Error(), "pq: ")
+			if strings.HasPrefix(errStr, "password authentication failed") && c.passwordMissing {
+				if pErr := c.fillPassword(); pErr != nil {
+					return errors.CombineErrors(err, pErr)
+				}
+				// Recurse, once. We recurse to ensure that pq.NewConnector
+				// and ConnectorWithNoticeHandler get called with the new URL.
+				// The recursion only occurs once because fillPassword()
+				// resets c.passwordMissing, so we cannot get into this
+				// conditional a second time.
+				return c.ensureConn()
+			}
+			// Not a password auth error, or password already set. Simply fail.
 			return wrapConnError(err)
 		}
 		if c.reconnecting && c.dbName != "" {
@@ -168,6 +193,19 @@ func (c *sqlConn) ensureConn() error {
 		c.reconnecting = false
 	}
 	return nil
+}
+
+// tryEnableServerExecutionTimings attempts to check if the server supports the
+// SHOW LAST QUERY STATISTICS statements. This allows the CLI client to report
+// server side execution timings instead of timing on the client.
+func (c *sqlConn) tryEnableServerExecutionTimings() {
+	_, _, err := c.getLastQueryStatistics()
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: cannot show server execution timings: unexpected column found\n")
+		sqlCtx.enableServerExecutionTimings = false
+	} else {
+		sqlCtx.enableServerExecutionTimings = true
+	}
 }
 
 func (c *sqlConn) getServerMetadata() (
@@ -299,6 +337,9 @@ func (c *sqlConn) checkServerMetadata() error {
 			fmt.Println("# Organization:", c.clusterOrganization)
 		}
 	}
+	// Try to enable server execution timings for the CLI to display if
+	// supported by the server.
+	c.tryEnableServerExecutionTimings()
 
 	return nil
 }
@@ -325,8 +366,6 @@ func (c *sqlConn) requireServerVersion(required *version.Version) error {
 // given sql query. If the query fails or does not return a single
 // column, `false` is returned in the second result.
 func (c *sqlConn) getServerValue(what, sql string) (driver.Value, bool) {
-	var dbVals [1]driver.Value
-
 	rows, err := c.Query(sql, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: error retrieving the %s: %v\n", what, err)
@@ -339,6 +378,8 @@ func (c *sqlConn) getServerValue(what, sql string) (driver.Value, bool) {
 		return nil, false
 	}
 
+	dbVals := make([]driver.Value, len(rows.Columns()))
+
 	err = rows.Next(dbVals[:])
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: invalid %s: %v\n", what, err)
@@ -346,6 +387,64 @@ func (c *sqlConn) getServerValue(what, sql string) (driver.Value, bool) {
 	}
 
 	return dbVals[0], true
+}
+
+// parseLastQueryStatistics runs the "SHOW LAST QUERY STATISTICS" statements,
+// performs sanity checks, and returns the exec latency and service latency from
+// the sql row parsed as time.Duration.
+func (c *sqlConn) getLastQueryStatistics() (
+	execLatency time.Duration,
+	serviceLatency time.Duration,
+	err error,
+) {
+	rows, err := c.Query("SHOW LAST QUERY STATISTICS", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		closeErr := rows.Close()
+		err = errors.CombineErrors(err, closeErr)
+	}()
+
+	if len(rows.Columns()) != 4 {
+		return 0, 0,
+			errors.New("unexpected number of columns in SHOW LAST QUERY STATISTICS")
+	}
+
+	if rows.Columns()[2] != "exec_latency" || rows.Columns()[3] != "service_latency" {
+		return 0, 0,
+			errors.New("unexpected columns in SHOW LAST QUERY STATISTICS")
+	}
+
+	iter := newRowIter(rows, true /* showMoreChars */)
+	nRows := 0
+	var execLatencyRaw string
+	var serviceLatencyRaw string
+	for {
+		row, err := iter.Next()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return 0, 0, err
+		}
+
+		execLatencyRaw = formatVal(row[2], false, false)
+		serviceLatencyRaw = formatVal(row[3], false, false)
+
+		nRows++
+	}
+
+	if nRows != 1 {
+		return 0, 0,
+			errors.Newf("unexpected number of rows in SHOW LAST QUERY STATISTICS: %d", nRows)
+	}
+
+	parsedExecLatency, _ := tree.ParseDInterval(execLatencyRaw)
+	parsedServiceLatency, _ := tree.ParseDInterval(serviceLatencyRaw)
+
+	return time.Duration(parsedExecLatency.Duration.Nanos()),
+		time.Duration(parsedServiceLatency.Duration.Nanos()),
+		nil
 }
 
 // sqlTxnShim implements the crdb.Tx interface.
@@ -424,7 +523,7 @@ func (c *sqlConn) Query(query string, args []driver.Value) (*sqlRows, error) {
 }
 
 func (c *sqlConn) QueryRow(query string, args []driver.Value) ([]driver.Value, error) {
-	rows, err := makeQuery(query, args...)(c)
+	rows, _, err := makeQuery(query, args...)(c)
 	if err != nil {
 		return nil, err
 	}
@@ -589,23 +688,33 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 		return nil, err
 	}
 
-	// Insecure connections are insecure and should never see a password. Reject
-	// one that may be present in the URL already.
-	if options.Get("sslmode") == "disable" {
-		if _, pwdSet := baseURL.User.Password(); pwdSet {
-			return nil, errors.Errorf("cannot specify a password in URL with an insecure connection")
+	// tcpConn is true iff the connection is going over the network.
+	tcpConn := baseURL.Host != ""
+
+	// If there is no TLS mode yet, conjure one based on defaults.
+	if options.Get("sslmode") == "" {
+		if cliCtx.Insecure {
+			options.Set("sslmode", "disable")
+		} else if tcpConn {
+			options.Set("sslmode", "verify-full")
 		}
-	} else {
-		if options.Get("sslcert") == "" || options.Get("sslkey") == "" {
-			// If there's no password in the URL yet and we don't have a client
-			// certificate, ask for it and populate it in the URL.
-			if _, pwdSet := baseURL.User.Password(); !pwdSet {
-				pwd, err := security.PromptForPassword()
-				if err != nil {
-					return nil, err
-				}
-				baseURL.User = url.UserPassword(baseURL.User.Username(), pwd)
-			}
+		// (We don't use TLS over unix socket conns.)
+	}
+
+	// Prevent explicit TLS request in insecure mode.
+	if cliCtx.Insecure && options.Get("sslmode") != "disable" {
+		return nil, errors.Errorf("cannot use TLS connections in insecure mode")
+	}
+
+	// How we're going to authenticate.
+	_, pwdSet := baseURL.User.Password()
+	if pwdSet {
+		// There's a password already configured.
+
+		// In insecure mode, we don't want the user to get the mistaken
+		// idea that a password is worth anything.
+		if cliCtx.Insecure {
+			return nil, errors.Errorf("password authentication not enabled in insecure mode")
 		}
 	}
 
@@ -631,13 +740,40 @@ func makeSQLClient(appName string, defaultMode defaultSQLDb) (*sqlConn, error) {
 		log.Infof(context.Background(), "connecting with URL: %s", sqlURL)
 	}
 
-	return makeSQLConn(sqlURL), nil
+	conn := makeSQLConn(sqlURL)
+
+	conn.passwordMissing = !pwdSet
+
+	return conn, nil
 }
 
-type queryFunc func(conn *sqlConn) (*sqlRows, error)
+// fillPassword is called the first time the server complains that the
+// password authentication has failed, if no password was supplied to
+// start with. It asks the user for a password interactively.
+func (c *sqlConn) fillPassword() error {
+	connURL, err := url.Parse(c.url)
+	if err != nil {
+		return err
+	}
+
+	// Password can be safely encrypted, or the user opted in
+	// manually to non-encryption. All good.
+
+	pwd, err := security.PromptForPassword()
+	if err != nil {
+		return err
+	}
+	connURL.User = url.UserPassword(connURL.User.Username(), pwd)
+	c.url = connURL.String()
+	c.passwordMissing = false
+	return nil
+}
+
+type queryFunc func(conn *sqlConn) (rows *sqlRows, isMultiStatementQuery bool, err error)
 
 func makeQuery(query string, parameters ...driver.Value) queryFunc {
-	return func(conn *sqlConn) (*sqlRows, error) {
+	return func(conn *sqlConn) (*sqlRows, bool, error) {
+		isMultiStatementQuery := parser.HasMultipleStatements(query)
 		// driver.Value is an alias for interface{}, but must adhere to a restricted
 		// set of types when being passed to driver.Queryer.Query (see
 		// driver.IsValue). We use driver.DefaultParameterConverter to perform the
@@ -648,17 +784,18 @@ func makeQuery(query string, parameters ...driver.Value) queryFunc {
 			var err error
 			parameters[i], err = driver.DefaultParameterConverter.ConvertValue(parameters[i])
 			if err != nil {
-				return nil, err
+				return nil, isMultiStatementQuery, err
 			}
 		}
-		return conn.Query(query, parameters)
+		rows, err := conn.Query(query, parameters)
+		return rows, isMultiStatementQuery, err
 	}
 }
 
 // runQuery takes a 'query' with optional 'parameters'.
 // It runs the sql query and returns a list of columns names and a list of rows.
 func runQuery(conn *sqlConn, fn queryFunc, showMoreChars bool) ([]string, [][]string, error) {
-	rows, err := fn(conn)
+	rows, _, err := fn(conn)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -696,14 +833,15 @@ var tagsWithRowsAffected = map[string]struct{}{
 
 // runQueryAndFormatResults takes a 'query' with optional 'parameters'.
 // It runs the sql query and writes output to 'w'.
-func runQueryAndFormatResults(conn *sqlConn, w io.Writer, fn queryFunc) error {
+func runQueryAndFormatResults(conn *sqlConn, w io.Writer, fn queryFunc) (err error) {
 	startTime := timeutil.Now()
-	rows, err := fn(conn)
+	rows, isMultiStatementQuery, err := fn(conn)
 	if err != nil {
 		return handleCopyError(conn, err)
 	}
 	defer func() {
-		_ = rows.Close()
+		closeErr := rows.Close()
+		err = errors.CombineErrors(err, closeErr)
 	}()
 	for {
 		// lib/pq is not able to tell us before the first call to Next()
@@ -789,23 +927,36 @@ func runQueryAndFormatResults(conn *sqlConn, w io.Writer, fn queryFunc) error {
 		}
 
 		if sqlCtx.showTimes {
-			// Present the time since the last result, or since the
-			// beginning of execution. Currently the execution engine makes
-			// all the work upfront so most of the time is accounted for by
-			// the 1st result; this is subject to change once CockroachDB
-			// evolves to stream results as statements are executed.
-			fmt.Fprintf(w, "\nTime: %s\n", queryCompleteTime.Sub(startTime))
-			// Make users better understand any discrepancy they observe.
+			clientSideQueryTime := queryCompleteTime.Sub(startTime)
+			// We don't print timings for multi-statement queries as we don't have an
+			// accurate way to measure them currently. See #48180.
+			if isMultiStatementQuery {
+				// No need to print if no one's watching.
+				if sqlCtx.isInteractive {
+					fmt.Fprintf(stderr, "Note: timings for multiple statements on a single line are not supported. See %s.\n", unimplemented.MakeURL(48180))
+				}
+			} else if sqlCtx.enableServerExecutionTimings {
+				execLatency, serviceLatency, err := conn.getLastQueryStatistics()
+				if err != nil {
+					return err
+				}
+				networkLatency := clientSideQueryTime - serviceLatency
+
+				fmt.Fprintf(w, "\nServer Execution Time: %s\n", execLatency)
+				fmt.Fprintf(w, "Network Latency: %s\n", networkLatency)
+			} else {
+				// If the server doesn't support `SHOW LAST QUERY STATISTICS` statement,
+				// we revert to the pre-20.2 time formatting in the CLI.
+				fmt.Fprintf(w, "\nTime: %s\n", clientSideQueryTime)
+			}
 			renderDelay := timeutil.Now().Sub(queryCompleteTime)
-			if renderDelay >= 1*time.Second {
-				fmt.Fprintf(w,
+			if renderDelay >= 1*time.Second && sqlCtx.isInteractive {
+				fmt.Fprintf(stderr,
 					"Note: an additional delay of %s was spent formatting the results.\n"+
 						"You can use \\set display_format to change the formatting.\n",
 					renderDelay)
 			}
 			fmt.Fprintln(w)
-			// Reset the clock. We ignore the rendering time.
-			startTime = timeutil.Now()
 		}
 
 		if more, err := rows.NextResultSet(); err != nil {

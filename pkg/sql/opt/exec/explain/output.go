@@ -16,8 +16,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 )
@@ -58,7 +58,7 @@ func (e *entry) isNode() bool {
 
 // EnterNode creates a new node as a child of the current node.
 func (ob *OutputBuilder) EnterNode(
-	name string, columns sqlbase.ResultColumns, ordering sqlbase.ColumnOrdering,
+	name string, columns colinfo.ResultColumns, ordering colinfo.ColumnOrdering,
 ) {
 	var colStr, ordStr string
 	if ob.flags.Verbose {
@@ -93,6 +93,55 @@ func (ob *OutputBuilder) LeaveNode() {
 // AddField adds an information field under the current node.
 func (ob *OutputBuilder) AddField(key, value string) {
 	ob.entries = append(ob.entries, entry{field: key, fieldVal: value})
+}
+
+// Attr adds an information field under the current node.
+func (ob *OutputBuilder) Attr(key string, value interface{}) {
+	ob.AddField(key, fmt.Sprint(value))
+}
+
+// VAttr adds an information field under the current node, if the Verbose flag
+// is set.
+func (ob *OutputBuilder) VAttr(key string, value interface{}) {
+	if ob.flags.Verbose {
+		ob.AddField(key, fmt.Sprint(value))
+	}
+}
+
+// Attrf is a formatter version of Attr.
+func (ob *OutputBuilder) Attrf(key, format string, args ...interface{}) {
+	ob.AddField(key, fmt.Sprintf(format, args...))
+}
+
+// Expr adds an information field with an expression. The expression's
+// IndexedVars refer to the given columns. If the expression is nil, nothing is
+// emitted.
+func (ob *OutputBuilder) Expr(key string, expr tree.TypedExpr, varColumns colinfo.ResultColumns) {
+	if expr == nil {
+		return
+	}
+	flags := tree.FmtSymbolicSubqueries
+	if ob.flags.ShowTypes {
+		flags |= tree.FmtShowTypes
+	}
+	if ob.flags.HideValues {
+		flags |= tree.FmtHideConstants
+	}
+	f := tree.NewFmtCtx(flags)
+	f.SetIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
+		// Ensure proper quoting.
+		n := tree.Name(varColumns[idx].Name)
+		ctx.WriteString(n.String())
+	})
+	f.FormatNode(expr)
+	ob.AddField(key, f.CloseAndGetString())
+}
+
+// VExpr is a verbose-only variant of Expr.
+func (ob *OutputBuilder) VExpr(key string, expr tree.TypedExpr, varColumns colinfo.ResultColumns) {
+	if ob.flags.Verbose {
+		ob.Expr(key, expr, varColumns)
+	}
 }
 
 // buildTreeRows creates the treeprinter structure; returns one string for each

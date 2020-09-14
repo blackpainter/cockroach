@@ -23,9 +23,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slinstance"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slstorage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -59,15 +62,22 @@ func TestRegistryCancelation(t *testing.T) {
 	// Insulate this test from wall time.
 	mClock := hlc.NewManualClock(hlc.UnixNano())
 	clock := hlc.NewClock(mClock.UnixNano, time.Nanosecond)
+	settings := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+	sqlStorage := slstorage.NewStorage(stopper, clock, db, nil, settings)
+	sqlInstance := slinstance.NewSQLInstance(stopper, clock, sqlStorage, settings)
 	registry := MakeRegistry(
 		log.AmbientContext{},
 		stopper,
 		clock,
-		sqlbase.MakeOptionalNodeLiveness(nodeLiveness),
+		optionalnodeliveness.MakeContainer(nodeLiveness),
 		db,
 		nil, /* ex */
 		base.TestingIDContainer,
-		cluster.NoSettings,
+		sqlInstance,
+		settings,
 		histogramWindowInterval,
 		FakePHS,
 		"",
@@ -99,7 +109,7 @@ func TestRegistryCancelation(t *testing.T) {
 	register := func() {
 		didRegister = true
 		jobID++
-		if err := registry.register(jobID, func() { cancelCount++ }); err != nil {
+		if err := registry.deprecatedRegister(jobID, func() { cancelCount++ }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -227,7 +237,7 @@ func TestRegistryGC(t *testing.T) {
 		desc.Mutations = mutations
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)
@@ -241,7 +251,7 @@ func TestRegistryGC(t *testing.T) {
 		desc.GCMutations = gcMutations
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)
@@ -260,7 +270,7 @@ func TestRegistryGC(t *testing.T) {
 		}
 		if err := kvDB.Put(
 			context.Background(),
-			sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
+			catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, desc.GetID()),
 			desc.DescriptorProto(),
 		); err != nil {
 			t.Fatal(err)

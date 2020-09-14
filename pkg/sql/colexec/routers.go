@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -164,7 +163,7 @@ func (o *routerOutputOp) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return o.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -177,9 +176,6 @@ type routerOutputOpTestingKnobs struct {
 	// defaultRouterOutputBlockedThreshold but can be modified by tests to test
 	// edge cases.
 	blockedThreshold int
-	// outputBatchSize defaults to coldata.BatchSize() but can be modified by
-	// tests to test edge cases.
-	outputBatchSize int
 	// alwaysFlush, if set to true, will always flush o.mu.pendingBatch to
 	// o.mu.data.
 	alwaysFlush bool
@@ -224,9 +220,6 @@ func newRouterOutputOp(args routerOutputOpArgs) *routerOutputOp {
 	if args.testingKnobs.blockedThreshold == 0 {
 		args.testingKnobs.blockedThreshold = getDefaultRouterOutputBlockedThreshold()
 	}
-	if args.testingKnobs.outputBatchSize == 0 {
-		args.testingKnobs.outputBatchSize = coldata.BatchSize()
-	}
 
 	o := &routerOutputOp{
 		types:               args.types,
@@ -241,7 +234,6 @@ func newRouterOutputOp(args routerOutputOpArgs) *routerOutputOp {
 		args.memoryLimit,
 		args.cfg,
 		args.fdSemaphore,
-		args.testingKnobs.outputBatchSize,
 		args.diskAcc,
 	)
 
@@ -419,9 +411,9 @@ func (o *routerOutputOp) addBatch(ctx context.Context, batch coldata.Batch, sele
 
 	for toAppend := len(selection); toAppend > 0; {
 		if o.mu.pendingBatch == nil {
-			o.mu.pendingBatch = o.mu.unlimitedAllocator.NewMemBatchWithSize(o.types, o.testingKnobs.outputBatchSize)
+			o.mu.pendingBatch = o.mu.unlimitedAllocator.NewMemBatchWithFixedCapacity(o.types, coldata.BatchSize())
 		}
-		available := o.testingKnobs.outputBatchSize - o.mu.pendingBatch.Length()
+		available := o.mu.pendingBatch.Capacity() - o.mu.pendingBatch.Length()
 		numAppended := toAppend
 		if toAppend > available {
 			numAppended = available
@@ -442,7 +434,7 @@ func (o *routerOutputOp) addBatch(ctx context.Context, batch coldata.Batch, sele
 		})
 		newLength := o.mu.pendingBatch.Length() + numAppended
 		o.mu.pendingBatch.SetLength(newLength)
-		if o.testingKnobs.alwaysFlush || newLength >= o.testingKnobs.outputBatchSize {
+		if o.testingKnobs.alwaysFlush || newLength >= o.mu.pendingBatch.Capacity() {
 			// The capacity in o.mu.pendingBatch has been filled.
 			err := o.mu.data.enqueue(ctx, o.mu.pendingBatch)
 			if err == nil && o.testingKnobs.addBatchTestInducedErrorCb != nil {
@@ -512,8 +504,6 @@ const (
 // returned by the constructor.
 type HashRouter struct {
 	OneInputNode
-	// types are the input types.
-	types []*types.T
 	// hashCols is a slice of indices of the columns used for hashing.
 	hashCols []uint32
 
@@ -603,12 +593,11 @@ func NewHashRouter(
 		outputs[i] = op
 		outputsAsOps[i] = op
 	}
-	return newHashRouterWithOutputs(input, types, hashCols, unblockEventsChan, outputs, toDrain, toClose), outputsAsOps
+	return newHashRouterWithOutputs(input, hashCols, unblockEventsChan, outputs, toDrain, toClose), outputsAsOps
 }
 
 func newHashRouterWithOutputs(
 	input colexecbase.Operator,
-	types []*types.T,
 	hashCols []uint32,
 	unblockEventsChan <-chan struct{},
 	outputs []routerOutput,
@@ -617,7 +606,6 @@ func newHashRouterWithOutputs(
 ) *HashRouter {
 	r := &HashRouter{
 		OneInputNode:        NewOneInputNode(input),
-		types:               types,
 		hashCols:            hashCols,
 		outputs:             outputs,
 		closers:             toClose,
@@ -746,7 +734,7 @@ func (r *HashRouter) processNextBatch(ctx context.Context) bool {
 		return true
 	}
 
-	selections := r.tupleDistributor.distribute(ctx, b, r.types, r.hashCols)
+	selections := r.tupleDistributor.distribute(ctx, b, r.hashCols)
 	for i, o := range r.outputs {
 		if o.addBatch(ctx, b, selections[i]) {
 			// This batch blocked the output.

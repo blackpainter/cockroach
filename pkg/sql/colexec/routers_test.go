@@ -165,7 +165,6 @@ func TestRouterOutputAddBatch(t *testing.T) {
 						unblockedEventsChan: unblockEventsChan,
 						testingKnobs: routerOutputOpTestingKnobs{
 							blockedThreshold: tc.blockedThreshold,
-							outputBatchSize:  tc.outputBatchSize,
 						},
 					},
 				)
@@ -434,7 +433,6 @@ func TestRouterOutputRandom(t *testing.T) {
 	var (
 		maxValues        = coldata.BatchSize() * 4
 		blockedThreshold = 1 + rng.Intn(maxValues-1)
-		outputSize       = 1 + rng.Intn(maxValues-1)
 	)
 
 	typs := []*types.T{types.Int, types.Int}
@@ -452,7 +450,7 @@ func TestRouterOutputRandom(t *testing.T) {
 	defer cleanup()
 
 	testName := fmt.Sprintf(
-		"blockedThreshold=%d/outputSize=%d/totalInputSize=%d", blockedThreshold, outputSize, len(data),
+		"blockedThreshold=%d/totalInputSize=%d", blockedThreshold, len(data),
 	)
 	for _, mtc := range memoryTestCases {
 		t.Run(fmt.Sprintf("%s/memoryLimit=%s", testName, humanizeutil.IBytes(mtc.bytes)), func(t *testing.T) {
@@ -470,7 +468,6 @@ func TestRouterOutputRandom(t *testing.T) {
 						unblockedEventsChan: unblockedEventsChans,
 						testingKnobs: routerOutputOpTestingKnobs{
 							blockedThreshold: blockedThreshold,
-							outputBatchSize:  outputSize,
 						},
 					},
 				)
@@ -642,7 +639,6 @@ func TestHashRouterComputesDestination(t *testing.T) {
 		expectedNumVals = []int{273, 252, 287, 212}
 		numOutputs      = 4
 		valsPushed      = make([]int, numOutputs)
-		typs            = []*types.T{types.Int}
 	)
 
 	outputs := make([]routerOutput, numOutputs)
@@ -669,7 +665,7 @@ func TestHashRouterComputesDestination(t *testing.T) {
 		}
 	}
 
-	r := newHashRouterWithOutputs(in, typs, []uint32{0}, nil /* ch */, outputs, nil /* toDrain */, nil /* toClose */)
+	r := newHashRouterWithOutputs(in, []uint32{0}, nil /* ch */, outputs, nil /* toDrain */, nil /* toClose */)
 	for r.processNextBatch(ctx) {
 	}
 
@@ -705,12 +701,12 @@ func TestHashRouterCancellation(t *testing.T) {
 
 	typs := []*types.T{types.Int}
 	// Never-ending input of 0s.
-	batch := testAllocator.NewMemBatch(typs)
+	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 	batch.SetLength(coldata.BatchSize())
 	in := colexecbase.NewRepeatableBatchSource(testAllocator, batch, typs)
 
 	unbufferedCh := make(chan struct{})
-	r := newHashRouterWithOutputs(in, typs, []uint32{0}, unbufferedCh, routerOutputs, nil /* toDrain */, nil /* toClose */)
+	r := newHashRouterWithOutputs(in, []uint32{0}, unbufferedCh, routerOutputs, nil /* toDrain */, nil /* toClose */)
 
 	t.Run("BeforeRun", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -858,7 +854,6 @@ func TestHashRouterRandom(t *testing.T) {
 		maxValues        = coldata.BatchSize() * 4
 		maxOutputs       = 128
 		blockedThreshold = 1 + rng.Intn(maxValues-1)
-		outputSize       = 1 + rng.Intn(maxValues-1)
 		numOutputs       = 1 + rng.Intn(maxOutputs-1)
 	)
 
@@ -918,11 +913,10 @@ func TestHashRouterRandom(t *testing.T) {
 	)
 
 	testName := fmt.Sprintf(
-		"terminationScenario=%d/numOutputs=%d/blockedThreshold=%d/outputSize=%d/totalInputSize=%d/hashCols=%v",
+		"terminationScenario=%d/numOutputs=%d/blockedThreshold=%d/totalInputSize=%d/hashCols=%v",
 		terminationScenario,
 		numOutputs,
 		blockedThreshold,
-		outputSize,
 		len(data),
 		hashCols,
 	)
@@ -961,7 +955,6 @@ func TestHashRouterRandom(t *testing.T) {
 							unblockedEventsChan: unblockEventsChan,
 							testingKnobs: routerOutputOpTestingKnobs{
 								blockedThreshold: blockedThreshold,
-								outputBatchSize:  outputSize,
 							},
 						},
 					)
@@ -1000,7 +993,6 @@ func TestHashRouterRandom(t *testing.T) {
 				const hashRouterMetadataMsg = "hash router test metadata"
 				r := newHashRouterWithOutputs(
 					inputs[0],
-					typs,
 					hashCols,
 					unblockEventsChan,
 					outputs,
@@ -1204,7 +1196,7 @@ func BenchmarkHashRouter(b *testing.B) {
 	// Use only one type. Note: the more types you use, the more you inflate the
 	// numbers.
 	typs := []*types.T{types.Int}
-	batch := testAllocator.NewMemBatch(typs)
+	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 	batch.SetLength(coldata.BatchSize())
 	input := colexecbase.NewRepeatableBatchSource(testAllocator, batch, typs)
 

@@ -11,15 +11,14 @@
 package coldataext
 
 import (
-	"fmt"
-
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/errors"
 )
 
 // Datum wraps a tree.Datum. This is the struct that datumVec.Get() returns.
@@ -40,7 +39,7 @@ type datumVec struct {
 	evalCtx *tree.EvalContext
 
 	scratch []byte
-	da      sqlbase.DatumAlloc
+	da      rowenc.DatumAlloc
 }
 
 var _ coldata.DatumVec = &datumVec{}
@@ -57,9 +56,9 @@ func newDatumVec(t *types.T, n int, evalCtx *tree.EvalContext) coldata.DatumVec 
 // BinFn evaluates the provided binary function between the receiver and other.
 // other can either be nil, tree.Datum, or *Datum.
 func (d *Datum) BinFn(
-	binFn *tree.BinOp, evalCtx *tree.EvalContext, other interface{},
+	binFn tree.TwoArgFn, evalCtx *tree.EvalContext, other interface{},
 ) (tree.Datum, error) {
-	return binFn.Fn(evalCtx, d.Datum, maybeUnwrapDatum(other))
+	return binFn(evalCtx, d.Datum, maybeUnwrapDatum(other))
 }
 
 // CompareDatum returns the comparison between d and other. The other is
@@ -79,8 +78,8 @@ func (d *Datum) Cast(dVec interface{}, toType *types.T) (tree.Datum, error) {
 }
 
 // Hash returns the hash of the datum as a byte slice.
-func (d *Datum) Hash(da *sqlbase.DatumAlloc) []byte {
-	ed := sqlbase.EncDatum{Datum: maybeUnwrapDatum(d)}
+func (d *Datum) Hash(da *rowenc.DatumAlloc) []byte {
+	ed := rowenc.EncDatum{Datum: maybeUnwrapDatum(d)}
 	b, err := ed.Fingerprint(d.ResolvedType(), da, nil /* appendTo */)
 	if err != nil {
 		colexecerror.InternalError(err)
@@ -149,7 +148,7 @@ func (dv *datumVec) Cap() int {
 // MarshalAt implements coldata.DatumVec interface.
 func (dv *datumVec) MarshalAt(i int) ([]byte, error) {
 	dv.maybeSetDNull(i)
-	return sqlbase.EncodeTableValue(
+	return rowenc.EncodeTableValue(
 		nil /* appendTo */, descpb.ColumnID(encoding.NoColumnID), dv.data[i], dv.scratch,
 	)
 }
@@ -158,7 +157,7 @@ func (dv *datumVec) MarshalAt(i int) ([]byte, error) {
 // index i.
 func (dv *datumVec) UnmarshalTo(i int, b []byte) error {
 	var err error
-	dv.data[i], _, err = sqlbase.DecodeTableValue(&dv.da, dv.t, b)
+	dv.data[i], _, err = rowenc.DecodeTableValue(&dv.da, dv.t, b)
 	return err
 }
 
@@ -175,7 +174,7 @@ func (dv *datumVec) assertValidDatum(datum tree.Datum) {
 func (dv *datumVec) assertSameTypeFamily(t *types.T) {
 	if dv.t.Family() != t.Family() {
 		colexecerror.InternalError(
-			fmt.Sprintf("cannot use value of type %+v on a datumVec of type %+v", t, dv.t),
+			errors.AssertionFailedf("cannot use value of type %+v on a datumVec of type %+v", t, dv.t),
 		)
 	}
 }
@@ -201,7 +200,7 @@ func maybeUnwrapDatum(v coldata.Datum) tree.Datum {
 	} else if datum, ok := v.(tree.Datum); ok {
 		return datum
 	}
-	colexecerror.InternalError(fmt.Sprintf("unexpected value: %v", v))
+	colexecerror.InternalError(errors.AssertionFailedf("unexpected value: %v", v))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }

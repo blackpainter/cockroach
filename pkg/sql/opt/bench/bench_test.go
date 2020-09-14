@@ -33,8 +33,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/xform"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -508,7 +508,7 @@ func (h *harness) prepareUsingAPI(tb testing.TB) {
 
 		id := tree.PlaceholderIdx(i)
 		typ, _ := h.semaCtx.Placeholders.ValueType(id)
-		texpr, err := sqlbase.SanitizeVarFreeExpr(
+		texpr, err := schemaexpr.SanitizeVarFreeExpr(
 			context.Background(),
 			parg,
 			typ,
@@ -573,7 +573,9 @@ func (h *harness) runUsingAPI(tb testing.TB, bmType BenchmarkType, usePrepared b
 	}
 
 	root := execMemo.RootExpr()
-	eb := execbuilder.New(exec.StubFactory{}, execMemo, nil /* catalog */, root, &h.evalCtx)
+	eb := execbuilder.New(
+		exec.StubFactory{}, execMemo, nil /* catalog */, root, &h.evalCtx, true, /* allowAutoCommit */
+	)
 	if _, err = eb.Build(); err != nil {
 		tb.Fatalf("%v", err)
 	}

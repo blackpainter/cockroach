@@ -588,7 +588,7 @@ func (r *Replica) leaseStatus(
 // including the node liveness table must use expiration leases to avoid
 // circular dependencies on the node liveness table.
 func (r *Replica) requiresExpiringLeaseRLocked() bool {
-	return r.store.cfg.NodeLiveness == nil || !r.store.cfg.EnableEpochRangeLeases ||
+	return r.store.cfg.NodeLiveness == nil ||
 		r.mu.state.Desc.StartKey.Less(roachpb.RKey(keys.NodeLivenessKeyMax))
 }
 
@@ -754,7 +754,14 @@ func (r *Replica) GetDescAndLease(ctx context.Context) (roachpb.RangeDescriptor,
 	// Sanity check the lease.
 	if !l.Empty() {
 		if _, ok := desc.GetReplicaDescriptorByID(l.Replica.ReplicaID); !ok {
-			log.Fatalf(ctx, "leaseholder replica not in descriptor; desc: %s, lease: %s", desc, l)
+			// I wish this could be a Fatal, but unfortunately it's possible for the
+			// lease to be incoherent with the descriptor after a leaseholder was
+			// brutally removed through `cockroach debug unsafe-remove-dead-replicas`.
+			log.Errorf(ctx, "leaseholder replica not in descriptor; desc: %s, lease: %s", desc, l)
+			// Let's not return an incoherent lease; for example if we end up
+			// returning it to a client through a br.RangeInfos, the client will freak
+			// out.
+			l = roachpb.Lease{}
 		}
 	}
 

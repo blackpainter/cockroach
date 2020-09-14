@@ -518,59 +518,6 @@ The port number should be the same as in --sql-addr unless port
 forwarding is set up on an intermediate firewall/router.`,
 	}
 
-	ListenTenantAddr = FlagInfo{
-		Name: "tenant-addr",
-		Description: `
-The hostname or IP address to bind to for tenant KV clients, for example
---tenant-addr=myhost:26257 or --tenant-addr=:26257 (listen on all
-interfaces). If left unspecified, the address specified by --listen-addr
-will be used for both RPC and SQL connections.
-<PRE>
-
-</PRE>
-If specified but the address part is omitted, the address part defaults
-to the address part of --listen-addr. If specified but the port number
-is omitted, the port number defaults to 26257.
-<PRE>
-
-</PRE>
-To actually use separate bindings, it is recommended to specify both
-flags and use a different port number via --listen-addr, for example
---tenant-addr=:36257 --listen-addr=:26257. Ensure that --join is set
-accordingly on other nodes. It is also possible to use the same port
-number but separate host addresses.
-<PRE>
-
-</PRE>
-An IPv6 address can also be specified with the notation [...], for
-example [::1]:26257 or [fe80::f6f2:::]:26257.`,
-	}
-
-	TenantAdvertiseAddr = FlagInfo{
-		Name: "advertise-tenant-addr",
-		Description: `
-The address/hostname and port to advertise to tenant SQL nodes for
-tenant KV communication. It must resolve and be routable from other
-nodes in the cluster.
-<PRE>
-
-</PRE>
-If left unspecified, it defaults to the setting of --tenant-addr. If the
-flag is provided but either the address part or the port part is left
-unspecified, that particular part defaults to the same part in
---tenant-addr.
-<PRE>
-
-</PRE>
-An IPv6 address can also be specified with the notation [...], for
-example [::1]:26257 or [fe80::f6f2:::]:26257.
-<PRE>
-
-</PRE>
-The port number should be the same as in --tenant-addr unless port
-forwarding is set up on an intermediate firewall/router.`,
-	}
-
 	ListenHTTPAddr = FlagInfo{
 		Name: "http-addr",
 		Description: `
@@ -588,6 +535,16 @@ When specified, restricts HTTP connections to localhost-only and disables
 TLS for the HTTP interface. The hostname part of --http-addr, if specified,
 is then ignored. This flag is intended for use to facilitate
 local testing without requiring certificate setups in web browsers.`,
+	}
+
+	AcceptSQLWithoutTLS = FlagInfo{
+		Name: "accept-sql-without-tls",
+		Description: `
+When specified, this node will accept SQL client connections that do not wish
+to negotiate a TLS handshake. Authentication is still otherwise required
+as per the HBA configuration and all other security mechanisms continue to
+apply. This flag is experimental.
+`,
 	}
 
 	LocalityAdvertiseAddr = FlagInfo{
@@ -841,12 +798,9 @@ Also, if you use equal signs in the file path to a store, you must use the
 	StorageEngine = FlagInfo{
 		Name: "storage-engine",
 		Description: `
-Storage engine to use for all stores on this cockroach node. Options are default,
-rocksdb, or pebble.
-
-If default is specified, the storage engine last used to write to the first
-store directory is used (see --store). If the store directory is uninitialized
-and default is specified, rocksdb is used as the default storage engine.`,
+Storage engine to use for all stores on this cockroach node. Options are pebble
+or rocksdb. If unspecified, pebble is used.
+`,
 	}
 
 	Size = FlagInfo{
@@ -980,6 +934,12 @@ If specified, takes priority over host/port flags.`,
 		Description: `
 If specified, print the system config contents. Beware that the output will be
 long and not particularly human-readable.`,
+	}
+
+	DecodeAsTable = FlagInfo{
+		Name: "decode-as-table",
+		Description: `
+Base64-encoded Descriptor to use as the table when decoding KVs.`,
 	}
 
 	DrainWait = FlagInfo{
@@ -1143,9 +1103,9 @@ the demo shell.`,
 	}
 
 	GeoLibsDir = FlagInfo{
-		Name: "geo-libs",
+		Name: "spatial-libs",
 		Description: `
-The location where all libraries for Geospatial operations is located.`,
+The location where all libraries for spatial operations is located.`,
 	}
 
 	Global = FlagInfo{

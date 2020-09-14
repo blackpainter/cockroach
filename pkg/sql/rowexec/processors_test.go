@@ -30,8 +30,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
@@ -49,13 +50,13 @@ import (
 func TestPostProcess(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	v := [10]sqlbase.EncDatum{}
+	v := [10]rowenc.EncDatum{}
 	for i := range v {
-		v[i] = sqlbase.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(i)))
+		v[i] = rowenc.DatumToEncDatum(types.Int, tree.NewDInt(tree.DInt(i)))
 	}
 
 	// We run the same input rows through various PostProcessSpecs.
-	input := sqlbase.EncDatumRows{
+	input := rowenc.EncDatumRows{
 		{v[0], v[1], v[2]},
 		{v[0], v[1], v[3]},
 		{v[0], v[1], v[4]},
@@ -76,7 +77,7 @@ func TestPostProcess(t *testing.T) {
 	}{
 		{
 			post:          execinfrapb.PostProcessSpec{},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -86,7 +87,7 @@ func TestPostProcess(t *testing.T) {
 			post: execinfrapb.PostProcessSpec{
 				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[1 2 3] [1 2 4] [1 3 4]]",
 		},
@@ -97,7 +98,7 @@ func TestPostProcess(t *testing.T) {
 				Projection:    true,
 				OutputColumns: []uint32{0, 2},
 			},
-			outputTypes:   sqlbase.TwoIntCols,
+			outputTypes:   rowenc.TwoIntCols,
 			expNeededCols: []int{0, 2},
 			expected:      "[[0 2] [0 3] [0 4] [0 3] [0 4] [0 4] [1 3] [1 4] [1 4] [2 4]]",
 		},
@@ -109,7 +110,7 @@ func TestPostProcess(t *testing.T) {
 				Projection:    true,
 				OutputColumns: []uint32{0, 2},
 			},
-			outputTypes:   sqlbase.TwoIntCols,
+			outputTypes:   rowenc.TwoIntCols,
 			expNeededCols: []int{0, 2},
 			expected:      "[[1 3] [1 4] [1 4]]",
 		},
@@ -121,7 +122,7 @@ func TestPostProcess(t *testing.T) {
 				Projection:    true,
 				OutputColumns: []uint32{0, 2},
 			},
-			outputTypes:   sqlbase.TwoIntCols,
+			outputTypes:   rowenc.TwoIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 3] [0 4] [1 3] [1 4]]",
 		},
@@ -131,7 +132,7 @@ func TestPostProcess(t *testing.T) {
 			post: execinfrapb.PostProcessSpec{
 				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1},
 			expected:      "[[0 1 1] [0 1 1] [0 1 1] [0 2 2] [0 2 2] [0 3 3] [1 2 3] [1 2 3] [1 3 4] [2 3 5]]",
 		},
@@ -142,7 +143,7 @@ func TestPostProcess(t *testing.T) {
 				Filter:      execinfrapb.Expression{Expr: "@2 = 2"},
 				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1},
 			expected:      "[[0 2 2] [0 2 2] [1 2 3] [1 2 3]]",
 		},
@@ -153,7 +154,7 @@ func TestPostProcess(t *testing.T) {
 				Filter:      execinfrapb.Expression{Expr: "@3 = 4"},
 				RenderExprs: []execinfrapb.Expression{{Expr: "@1"}, {Expr: "@2"}, {Expr: "@1 + @2"}},
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 1] [0 2 2] [0 3 3] [1 2 3] [1 3 4] [2 3 5]]",
 		},
@@ -189,7 +190,7 @@ func TestPostProcess(t *testing.T) {
 		// Offset.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -197,25 +198,25 @@ func TestPostProcess(t *testing.T) {
 		// Limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 3},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 9},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 10},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Limit: 11},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 1 2] [0 1 3] [0 1 4] [0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -223,25 +224,25 @@ func TestPostProcess(t *testing.T) {
 		// Offset + limit.
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 2},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 6},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 7},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
 		{
 			post:          execinfrapb.PostProcessSpec{Offset: 3, Limit: 8},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[0 2 3] [0 2 4] [0 3 4] [1 2 3] [1 2 4] [1 3 4] [2 3 4]]",
 		},
@@ -252,7 +253,7 @@ func TestPostProcess(t *testing.T) {
 				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
 				Offset: 1,
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[1 2 4] [1 3 4]]",
 		},
@@ -263,7 +264,7 @@ func TestPostProcess(t *testing.T) {
 				Filter: execinfrapb.Expression{Expr: "@1 = 1"},
 				Limit:  2,
 			},
-			outputTypes:   sqlbase.ThreeIntCols,
+			outputTypes:   rowenc.ThreeIntCols,
 			expNeededCols: []int{0, 1, 2},
 			expected:      "[[1 2 3] [1 2 4]]",
 		},
@@ -271,7 +272,7 @@ func TestPostProcess(t *testing.T) {
 
 	for tcIdx, tc := range testCases {
 		t.Run(strconv.Itoa(tcIdx), func(t *testing.T) {
-			inBuf := distsqlutils.NewRowBuffer(sqlbase.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
+			inBuf := distsqlutils.NewRowBuffer(rowenc.ThreeIntCols, input, distsqlutils.RowBufferArgs{})
 			outBuf := &distsqlutils.RowBuffer{}
 
 			var out execinfra.ProcOutputHelper
@@ -307,7 +308,7 @@ func TestPostProcess(t *testing.T) {
 					break
 				}
 			}
-			var res sqlbase.EncDatumRows
+			var res rowenc.EncDatumRows
 			for {
 				row := outBuf.NextNoMeta(t)
 				if row == nil {
@@ -427,7 +428,7 @@ func TestProcessorBaseContext(t *testing.T) {
 		}
 		defer flowCtx.EvalCtx.Stop(ctx)
 
-		input := execinfra.NewRepeatableRowSource(sqlbase.OneIntCol, sqlbase.MakeIntRows(10, 1))
+		input := execinfra.NewRepeatableRowSource(rowenc.OneIntCol, rowenc.MakeIntRows(10, 1))
 		noop, err := newNoopProcessor(flowCtx, 0 /* processorID */, input, &execinfrapb.PostProcessSpec{}, &rowDisposer{})
 		if err != nil {
 			t.Fatal(err)
@@ -547,7 +548,7 @@ func TestDrainingProcessorSwallowsUncertaintyError(t *testing.T) {
 
 	blockedRead.unblockCond = sync.NewCond(&blockedRead.Mutex)
 
-	tc := serverutils.StartTestCluster(t, 3, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 3, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -772,7 +773,7 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 		}(nodeIdx)
 	}
 
-	tc := serverutils.StartTestCluster(t, numNodes, testClusterArgs)
+	tc := serverutils.StartNewTestCluster(t, numNodes, testClusterArgs)
 	defer tc.Stopper().Stop(context.Background())
 
 	// Create a 30-row table, split and scatter evenly across the numNodes nodes.
@@ -852,11 +853,6 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 		vectorizeOpt := "off"
 		if vectorize {
 			vectorizeOpt = "on"
-			// Occasionally, the vectorized engine propagates either flow's or
-			// stream's context canceled error instead of the expected one, so
-			// we temporarily skip such config.
-			// TODO(yuzefovich): remove this.
-			skip.WithIssue(t, 52057)
 		}
 		for _, testCase := range testCases {
 			t.Run(testCase.query, func(t *testing.T) {
@@ -921,5 +917,54 @@ func TestUncertaintyErrorIsReturned(t *testing.T) {
 				}()
 			})
 		}
+	})
+}
+
+// TestFlowConcurrenTxnUse tests that FlowBase correctly returns whether there
+// will be concurrent txn usage. This test lives in this package for easier
+// instantiation of processors.
+func TestFlowConcurrentTxnUse(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	t.Run("TestSingleGoroutine", func(t *testing.T) {
+		flow := &flowinfra.FlowBase{}
+		flow.SetProcessors([]execinfra.Processor{
+			// samplerProcessor is used here and the other subtests because it does
+			// not implement RowSource and so must be run in a separate goroutine (it
+			// cannot be fused).
+			&samplerProcessor{
+				input: &tableReader{},
+			},
+		})
+		require.False(t, flow.ConcurrentTxnUse(), "expected no concurrent txn use because there is only one goroutine")
+	})
+	t.Run("TestMultipleGoroutinesWithNoConcurrentTxnUse", func(t *testing.T) {
+		flow := &flowinfra.FlowBase{}
+		// This is a common plan for stats collection. Neither processor implements
+		// RowSource, so the sampleAggregator must be run in a separate goroutine
+		// with a RowChannel connecting the two.
+		flow.SetProcessors([]execinfra.Processor{
+			&samplerProcessor{
+				input: &tableReader{},
+			},
+			&sampleAggregator{
+				input: &execinfra.RowChannel{},
+			},
+		})
+		require.False(t, flow.ConcurrentTxnUse(), "expected no concurrent txn use because the tableReader should be the only txn user")
+	})
+	t.Run("TestMultipleGoroutinesWithConcurrentTxnUse", func(t *testing.T) {
+		flow := &flowinfra.FlowBase{}
+		// This is a scenario that should never happen, but is useful for testing
+		// (multiple concurrent samplerProcessors).
+		flow.SetProcessors([]execinfra.Processor{
+			&samplerProcessor{
+				input: &tableReader{},
+			},
+			&samplerProcessor{
+				input: &tableReader{},
+			},
+		})
+		require.True(t, flow.ConcurrentTxnUse(), "expected concurrent txn use given that there are two tableReaders each in a separate goroutine")
 	})
 }

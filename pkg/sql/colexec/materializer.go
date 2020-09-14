@@ -12,15 +12,16 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // Materializer converts an Operator input into a execinfra.RowSource.
@@ -43,14 +44,14 @@ type Materializer struct {
 	// converter contains the converted vectors of the current batch. Note that
 	// if the batch had a selection vector on top of it, the converted vectors
 	// will be "dense" and contain only tuples that were selected.
-	converter *vecToDatumConverter
+	converter *colconv.VecToDatumConverter
 
 	// row is the memory used for the output row.
-	row sqlbase.EncDatumRow
+	row rowenc.EncDatumRow
 
 	// Fields to store the returned results of next() to be passed through an
 	// adapter.
-	outputRow      sqlbase.EncDatumRow
+	outputRow      rowenc.EncDatumRow
 	outputMetadata *execinfrapb.ProducerMetadata
 
 	// cancelFlow will return a function to cancel the context of the flow. It is
@@ -85,7 +86,7 @@ func newDrainHelper(sources execinfrapb.MetadataSources) *drainHelper {
 
 // OutputTypes implements the RowSource interface.
 func (d *drainHelper) OutputTypes() []*types.T {
-	colexecerror.InternalError("unimplemented")
+	colexecerror.InternalError(errors.AssertionFailedf("unimplemented"))
 	// Unreachable code.
 	return nil
 }
@@ -97,7 +98,7 @@ func (d *drainHelper) Start(ctx context.Context) context.Context {
 }
 
 // Next implements the RowSource interface.
-func (d *drainHelper) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (d *drainHelper) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	if d.bufferedMeta == nil {
 		d.bufferedMeta = d.DrainMeta(d.ctx)
 		if d.bufferedMeta == nil {
@@ -153,8 +154,8 @@ func NewMaterializer(
 		input:       input,
 		typs:        typs,
 		drainHelper: newDrainHelper(metadataSourcesQueue),
-		converter:   newVecToDatumConverter(len(typs), vecIdxsToConvert),
-		row:         make(sqlbase.EncDatumRow, len(typs)),
+		converter:   colconv.NewVecToDatumConverter(len(typs), vecIdxsToConvert),
+		row:         make(rowenc.EncDatumRow, len(typs)),
 		closers:     toClose,
 	}
 
@@ -195,7 +196,7 @@ func (m *Materializer) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return m.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -216,7 +217,7 @@ func (m *Materializer) nextAdapter() {
 
 // next is the logic of Next() extracted in a separate method to be used by an
 // adapter to be able to wrap the latter with a catcher.
-func (m *Materializer) next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (m *Materializer) next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	if m.State == execinfra.StateRunning {
 		if m.batch == nil || m.curIdx >= m.batch.Length() {
 			// Get a fresh batch.
@@ -226,14 +227,14 @@ func (m *Materializer) next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadat
 				return nil, m.DrainHelper()
 			}
 			m.curIdx = 0
-			m.converter.convertBatch(m.batch)
+			m.converter.ConvertBatchAndDeselect(m.batch)
 		}
 
 		for colIdx := range m.typs {
 			// Note that we don't need to apply the selection vector of the
 			// batch to index m.curIdx because vecToDatumConverter returns a
 			// "dense" datum column.
-			m.row[colIdx].Datum = m.converter.getDatumColumn(colIdx)[m.curIdx]
+			m.row[colIdx].Datum = m.converter.GetDatumColumn(colIdx)[m.curIdx]
 		}
 		m.curIdx++
 		// Note that there is no post-processing to be done in the
@@ -245,7 +246,7 @@ func (m *Materializer) next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadat
 }
 
 // Next is part of the execinfra.RowSource interface.
-func (m *Materializer) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (m *Materializer) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	if err := colexecerror.CatchVectorizedRuntimeError(m.nextAdapter); err != nil {
 		m.MoveToDraining(err)
 		return nil, m.DrainHelper()

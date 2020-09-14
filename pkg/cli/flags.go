@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
@@ -51,8 +52,6 @@ var serverListenPort, serverSocketDir string
 var serverAdvertiseAddr, serverAdvertisePort string
 var serverSQLAddr, serverSQLPort string
 var serverSQLAdvertiseAddr, serverSQLAdvertisePort string
-var serverTenantAddr, serverTenantPort string
-var serverTenantAdvertiseAddr, serverTenantAdvertisePort string
 var serverHTTPAddr, serverHTTPPort string
 var localityAdvertiseHosts localityList
 var sqlAuditLogDir log.DirName
@@ -72,11 +71,6 @@ func initPreFlagsDefaults() {
 	serverSQLPort = ""
 	serverSQLAdvertiseAddr = ""
 	serverSQLAdvertisePort = ""
-
-	serverTenantAddr = ""
-	serverTenantPort = ""
-	serverTenantAdvertiseAddr = ""
-	serverTenantAdvertisePort = ""
 
 	serverHTTPAddr = ""
 	serverHTTPPort = base.DefaultHTTPPort
@@ -351,19 +345,13 @@ func init() {
 		varFlag(f, addrSetter{&serverAdvertiseAddr, &serverAdvertisePort}, cliflags.AdvertiseAddr)
 		varFlag(f, addrSetter{&serverSQLAddr, &serverSQLPort}, cliflags.ListenSQLAddr)
 		varFlag(f, addrSetter{&serverSQLAdvertiseAddr, &serverSQLAdvertisePort}, cliflags.SQLAdvertiseAddr)
-		varFlag(f, addrSetter{&serverTenantAddr, &serverTenantPort}, cliflags.ListenTenantAddr)
-		varFlag(f, addrSetter{&serverTenantAdvertiseAddr, &serverTenantAdvertisePort}, cliflags.TenantAdvertiseAddr)
 		varFlag(f, addrSetter{&serverHTTPAddr, &serverHTTPPort}, cliflags.ListenHTTPAddr)
 		stringFlag(f, &serverSocketDir, cliflags.SocketDir)
-		// --socket is deprecated as of 20.1.
-		// TODO(knz): remove in 20.2.
-		stringFlag(f, &serverCfg.SocketFile, cliflags.Socket)
-		_ = f.MarkDeprecated(cliflags.Socket.Name, "use the --socket-dir and --listen-addr flags instead")
 		boolFlag(f, &startCtx.unencryptedLocalhostHTTP, cliflags.UnencryptedLocalhostHTTP)
 
-		// Hide tenant-related flags.
-		_ = f.MarkHidden(cliflags.ListenTenantAddr.Name)
-		_ = f.MarkHidden(cliflags.TenantAdvertiseAddr.Name)
+		// The following flag is planned to become non-experimental in 21.1.
+		boolFlag(f, &serverCfg.AcceptSQLWithoutTLS, cliflags.AcceptSQLWithoutTLS)
+		_ = f.MarkHidden(cliflags.AcceptSQLWithoutTLS.Name)
 
 		// Backward-compatibility flags.
 
@@ -407,6 +395,8 @@ func init() {
 		// Use a separate variable to store the value of ServerInsecure.
 		// We share the default with the ClientInsecure flag.
 		boolFlag(f, &startCtx.serverInsecure, cliflags.ServerInsecure)
+		_ = f.MarkDeprecated(cliflags.ServerInsecure.Name, "it will be removed in a subsequent release.\n"+
+			"For details, see: "+unimplemented.MakeURL(53404))
 
 		// Enable/disable various external storage endpoints.
 		boolFlag(f, &serverCfg.ExternalIODirConfig.DisableHTTP, cliflags.ExternalIODisableHTTP)
@@ -502,7 +492,6 @@ func init() {
 	for _, cmd := range []*cobra.Command{
 		createCACertCmd,
 		createClientCACertCmd,
-		mtCreateTenantServerCACertCmd,
 		mtCreateTenantClientCACertCmd,
 	} {
 		f := cmd.Flags()
@@ -515,7 +504,6 @@ func init() {
 	for _, cmd := range []*cobra.Command{
 		createNodeCertCmd,
 		createClientCertCmd,
-		mtCreateTenantServerCertCmd,
 		mtCreateTenantClientCertCmd,
 	} {
 		f := cmd.Flags()
@@ -528,8 +516,6 @@ func init() {
 		createClientCACertCmd,
 		createNodeCertCmd,
 		createClientCertCmd,
-		mtCreateTenantServerCACertCmd,
-		mtCreateTenantServerCertCmd,
 		mtCreateTenantClientCACertCmd,
 		mtCreateTenantClientCertCmd,
 	} {
@@ -543,8 +529,6 @@ func init() {
 
 	// The certs dir is given to all clientCmds below, but the following are not clientCmds.
 	for _, cmd := range []*cobra.Command{
-		mtCreateTenantServerCACertCmd,
-		mtCreateTenantServerCertCmd,
 		mtCreateTenantClientCACertCmd,
 		mtCreateTenantClientCertCmd,
 	} {
@@ -557,6 +541,7 @@ func init() {
 		debugGossipValuesCmd,
 		debugTimeSeriesDumpCmd,
 		debugZipCmd,
+		doctorClusterCmd,
 		dumpCmd,
 		genHAProxyCmd,
 		initCmd,
@@ -577,6 +562,8 @@ func init() {
 		_ = f.MarkHidden(cliflags.ClientPort.Name)
 
 		boolFlag(f, &baseCfg.Insecure, cliflags.ClientInsecure)
+		_ = f.MarkDeprecated(cliflags.ServerInsecure.Name, "it will be removed in a subsequent release.\n"+
+			"For details, see: "+unimplemented.MakeURL(53404))
 
 		// Certificate flags.
 		stringFlag(f, &baseCfg.SSLCertsDir, cliflags.CertsDir)
@@ -595,6 +582,7 @@ func init() {
 		statusNodeCmd,
 		lsNodesCmd,
 		debugZipCmd,
+		doctorClusterCmd,
 		// If you add something here, make sure the actual implementation
 		// of the command uses `cmdTimeoutContext(.)` or it will ignore
 		// the timeout.
@@ -678,7 +666,7 @@ func init() {
 	boolFlag(dumpCmd.Flags(), &dumpCtx.dumpAll, cliflags.DumpAll)
 
 	// Commands that establish a SQL connection.
-	sqlCmds := []*cobra.Command{sqlShellCmd, dumpCmd, demoCmd}
+	sqlCmds := []*cobra.Command{sqlShellCmd, dumpCmd, demoCmd, doctorClusterCmd}
 	sqlCmds = append(sqlCmds, authCmds...)
 	sqlCmds = append(sqlCmds, demoCmd.Commands()...)
 	sqlCmds = append(sqlCmds, stmtDiagCmds...)
@@ -704,7 +692,6 @@ func init() {
 			_ = f.MarkHidden(cliflags.ClientHost.Name)
 			stringFlag(f, &cliCtx.clientConnPort, cliflags.ClientPort)
 			_ = f.MarkHidden(cliflags.ClientPort.Name)
-
 		}
 
 		if cmd == sqlShellCmd {
@@ -756,6 +743,8 @@ func init() {
 		varFlag(f, demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)
 		varFlag(f, demoNodeCacheSizeValue, cliflags.DemoNodeCacheSize)
 		boolFlag(f, &demoCtx.insecure, cliflags.ClientInsecure)
+		_ = f.MarkDeprecated(cliflags.ServerInsecure.Name, "it will be removed in a subsequent release.\n"+
+			"For details, see: "+unimplemented.MakeURL(53404))
 		boolFlag(f, &demoCtx.disableLicenseAcquisition, cliflags.DemoNoLicense)
 		// Mark the --global flag as hidden until we investigate it more.
 		boolFlag(f, &demoCtx.simulateLatency, cliflags.Global)
@@ -795,6 +784,7 @@ func init() {
 		intFlag(f, &debugCtx.maxResults, cliflags.Limit)
 		boolFlag(f, &debugCtx.values, cliflags.Values)
 		boolFlag(f, &debugCtx.sizes, cliflags.Sizes)
+		stringFlag(f, &debugCtx.decodeAsTableDesc, cliflags.DecodeAsTable)
 	}
 	{
 		f := debugRangeDataCmd.Flags()
@@ -819,11 +809,16 @@ func init() {
 		// (which is a PreRun for this command):
 		_ = extraServerFlagInit // guru assignment
 		boolFlag(f, &startCtx.serverInsecure, cliflags.ServerInsecure)
+		_ = f.MarkDeprecated(cliflags.ServerInsecure.Name, "it will be removed in a subsequent release.\n"+
+			"For details, see: "+unimplemented.MakeURL(53404))
+
 		stringFlag(f, &startCtx.serverSSLCertsDir, cliflags.ServerCertsDir)
 		// NB: this also gets PreRun treatment via extraServerFlagInit to populate BaseCfg.SQLAddr.
 		varFlag(f, addrSetter{&serverSQLAddr, &serverSQLPort}, cliflags.ListenSQLAddr)
+		varFlag(f, addrSetter{&serverHTTPAddr, &serverHTTPPort}, cliflags.ListenHTTPAddr)
 
 		stringSliceFlag(f, &serverCfg.SQLConfig.TenantKVAddrs, cliflags.KVAddrs)
+		varFlag(f, &startCtx.logDir, cliflags.LogDir)
 	}
 }
 
@@ -940,14 +935,12 @@ func extraServerFlagInit(cmd *cobra.Command) error {
 	// Construct the socket name, if requested. The flags may not be defined for
 	// `cmd` so be cognizant of that.
 	//
-	// If --socket (DEPRECATED) was set, then serverCfg.SocketFile is
-	// already set and we don't want to change it.
-	// However, if --socket-dir is set, then we'll use that.
+	// If --socket-dir is set, then we'll use that.
 	// There are two cases:
 	// 1. --socket-dir is set and is empty; in this case the user is telling us
 	//    "disable the socket".
 	// 2. is set and non-empty. Then it should be used as specified.
-	if !changed(fs, cliflags.Socket.Name) && changed(fs, cliflags.SocketDir.Name) {
+	if changed(fs, cliflags.SocketDir.Name) {
 		if serverSocketDir == "" {
 			serverCfg.SocketFile = ""
 		} else {
@@ -992,36 +985,6 @@ func extraServerFlagInit(cmd *cobra.Command) error {
 		}
 	}
 	serverCfg.SQLAdvertiseAddr = net.JoinHostPort(serverSQLAdvertiseAddr, serverSQLAdvertisePort)
-
-	// Fill in the defaults for --tenant-addr.
-	if serverTenantAddr == "" {
-		serverTenantAddr = startCtx.serverListenAddr
-	}
-	if serverTenantPort == "" {
-		serverTenantPort = serverListenPort
-	}
-	serverCfg.TenantAddr = net.JoinHostPort(serverTenantAddr, serverTenantPort)
-	// NOTE: multi-tenancy commands don't register this flag.
-	if f := fs.Lookup(cliflags.ListenTenantAddr.Name); f != nil {
-		serverCfg.SplitListenTenant = f.Changed
-	}
-
-	// Fill in the defaults for --advertise-tenant-addr, if the flag exists on `cmd`.
-	if serverTenantAdvertiseAddr == "" {
-		if advSpecified {
-			serverTenantAdvertiseAddr = serverAdvertiseAddr
-		} else {
-			serverTenantAdvertiseAddr = serverTenantAddr
-		}
-	}
-	if serverTenantAdvertisePort == "" {
-		if advSpecified && !serverCfg.SplitListenTenant {
-			serverTenantAdvertisePort = serverAdvertisePort
-		} else {
-			serverTenantAdvertisePort = serverTenantPort
-		}
-	}
-	serverCfg.TenantAdvertiseAddr = net.JoinHostPort(serverTenantAdvertiseAddr, serverTenantAdvertisePort)
 
 	// Fill in the defaults for --http-addr.
 	if serverHTTPAddr == "" {

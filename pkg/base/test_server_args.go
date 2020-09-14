@@ -12,6 +12,7 @@ package base
 
 import (
 	"context"
+	"net"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -43,6 +44,13 @@ type TestServerArgs struct {
 	// tests don't get log spam about ranges not being replicated enough. This
 	// is always set to true when the server is started via a TestCluster.
 	PartOfCluster bool
+
+	// Listener (if nonempty) is the listener to use for all incoming RPCs.
+	// If a listener is installed, it informs the RPC `Addr` used below. The
+	// Server itself knows to close it out. This is useful for when a test wants
+	// manual control over how the join flags (`JoinAddr`) are populated, and
+	// installs listeners manually to know which addresses to point to.
+	Listener net.Listener
 
 	// Addr (if nonempty) is the RPC address to use for the test server.
 	Addr string
@@ -218,4 +226,8 @@ type TestTenantArgs struct {
 	// AllowSettingClusterSettings, if true, allows the tenant to set in-memory
 	// cluster settings.
 	AllowSettingClusterSettings bool
+
+	// TenantIDCodecOverride overrides the tenant ID used to construct the SQL
+	// server's codec, but nothing else (e.g. its certs). Used for testing.
+	TenantIDCodecOverride roachpb.TenantID
 }

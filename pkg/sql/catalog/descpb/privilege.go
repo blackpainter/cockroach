@@ -18,6 +18,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/errors"
+)
+
+// PrivilegeDescVersion is a custom type for PrivilegeDescriptor versions.
+//go:generate stringer -type=PrivilegeDescVersion
+type PrivilegeDescVersion uint32
+
+const (
+	// InitialVersion corresponds to all descriptors created before 20.1.
+	// These descriptors may not have owners explicitly set.
+	InitialVersion PrivilegeDescVersion = iota
+
+	// OwnerVersion corresponds to descriptors created 20.2 and onward.
+	// These descriptors should always have owner set.
+	OwnerVersion
 )
 
 func isPrivilegeSet(bits uint32, priv privilege.Kind) bool {
@@ -90,6 +105,7 @@ func NewCustomSuperuserPrivilegeDescriptor(priv privilege.List, owner string) *P
 				Privileges: priv.ToBitField(),
 			},
 		},
+		Version: OwnerVersion,
 	}
 }
 
@@ -104,6 +120,7 @@ func NewPrivilegeDescriptor(user string, priv privilege.List, owner string) *Pri
 				Privileges: priv.ToBitField(),
 			},
 		},
+		Version: OwnerVersion,
 	}
 }
 
@@ -139,7 +156,9 @@ func (p *PrivilegeDescriptor) Grant(user string, privList privilege.List) {
 }
 
 // Revoke removes privileges from this descriptor for a given list of users.
-func (p *PrivilegeDescriptor) Revoke(user string, privList privilege.List) {
+func (p *PrivilegeDescriptor) Revoke(
+	user string, privList privilege.List, objectType privilege.ObjectType,
+) {
 	userPriv, ok := p.findUser(user)
 	if !ok || userPriv.Privileges == 0 {
 		// Removing privileges from a user without privileges is a no-op.
@@ -158,8 +177,9 @@ func (p *PrivilegeDescriptor) Revoke(user string, privList privilege.List) {
 	if isPrivilegeSet(userPriv.Privileges, privilege.ALL) {
 		// User has 'ALL' privilege. Remove it and set
 		// all other privileges one.
+		validPrivs := privilege.GetValidPrivilegesForObject(objectType)
 		userPriv.Privileges = 0
-		for _, v := range privilege.ByValue {
+		for _, v := range validPrivs {
 			if v != privilege.ALL {
 				userPriv.Privileges |= v.Mask()
 			}
@@ -228,37 +248,43 @@ func MaybeFixPrivileges(id ID, p *PrivilegeDescriptor) bool {
 	return modified
 }
 
-// Validate is called when writing a database or table descriptor.
+// Validate is called when writing a database, table or type descriptor.
 // It takes the descriptor ID which is used to determine if
 // it belongs to a system descriptor, in which case the maximum
 // set of allowed privileges is looked up and applied.
-func (p PrivilegeDescriptor) Validate(id ID) error {
-	allowedPrivileges := privilege.List{privilege.ALL}
+func (p PrivilegeDescriptor) Validate(id ID, objectType privilege.ObjectType) error {
+	allowedPrivileges := DefaultSuperuserPrivileges
+
 	if IsReservedID(id) {
 		var ok bool
 		allowedPrivileges, ok = SystemAllowedPrivileges[id]
 		if !ok {
-			return fmt.Errorf("no allowed privileges found for system object with ID=%d", id)
+			return fmt.Errorf("no allowed privileges found for system %s with ID=%d",
+				objectType, id)
 		}
 	}
 
 	// Check "root" user.
-	if err := p.validateRequiredSuperuser(id, allowedPrivileges, security.RootUser); err != nil {
+	if err := p.validateRequiredSuperuser(id, allowedPrivileges, security.RootUser, objectType); err != nil {
 		return err
 	}
 
 	// We expect an "admin" role. Check that it has desired superuser permissions.
-	if err := p.validateRequiredSuperuser(id, allowedPrivileges, security.AdminRole); err != nil {
+	if err := p.validateRequiredSuperuser(id, allowedPrivileges, security.AdminRole, objectType); err != nil {
 		return err
 	}
 
-	allowedPrivilegesBits := allowedPrivileges.ToBitField()
-	if isPrivilegeSet(allowedPrivilegesBits, privilege.ALL) {
-		// ALL privileges allowed, we can skip regular users.
-		return nil
+	if p.Version >= OwnerVersion {
+		if p.Owner == "" {
+			return errors.AssertionFailedf("found no owner for system %s with ID=%d",
+				objectType, id)
+		}
 	}
 
+	allowedPrivilegesBits := privilege.GetValidPrivilegesForObject(objectType).ToBitField()
+
 	// For all non-super users, privileges must not exceed the allowed privileges.
+	// Also the privileges must be valid on the object type.
 	for _, u := range p.Users {
 		if u.User == security.RootUser || u.User == security.AdminRole {
 			// We've already checked super users.
@@ -266,8 +292,15 @@ func (p PrivilegeDescriptor) Validate(id ID) error {
 		}
 
 		if remaining := u.Privileges &^ allowedPrivilegesBits; remaining != 0 {
-			return fmt.Errorf("user %s must not have %s privileges on system object with ID=%d",
-				u.User, privilege.ListFromBitField(remaining), id)
+			return fmt.Errorf("user %s must not have %s privileges on system %s with ID=%d",
+				u.User, privilege.ListFromBitField(remaining, privilege.Any), objectType, id)
+		}
+		// Get all the privilege bits set on the descriptor even if they're not valid.
+		privs := privilege.ListFromBitField(u.Privileges, privilege.Any)
+		if err := privilege.ValidatePrivileges(
+			privs, objectType,
+		); err != nil {
+			return err
 		}
 	}
 
@@ -275,17 +308,18 @@ func (p PrivilegeDescriptor) Validate(id ID) error {
 }
 
 func (p PrivilegeDescriptor) validateRequiredSuperuser(
-	id ID, allowedPrivileges privilege.List, user string,
+	id ID, allowedPrivileges privilege.List, user string, objectType privilege.ObjectType,
 ) error {
 	superPriv, ok := p.findUser(user)
 	if !ok {
-		return fmt.Errorf("user %s does not have privileges over system object with ID=%d", user, id)
+		return fmt.Errorf("user %s does not have privileges over system %s with ID=%d",
+			user, objectType, id)
 	}
 
 	// The super users must match the allowed privilege set exactly.
 	if superPriv.Privileges != allowedPrivileges.ToBitField() {
-		return fmt.Errorf("user %s must have exactly %s privileges on system object with ID=%d",
-			user, allowedPrivileges, id)
+		return fmt.Errorf("user %s must have exactly %s privileges on system %s with ID=%d",
+			user, allowedPrivileges, objectType, id)
 	}
 
 	return nil
@@ -305,12 +339,12 @@ func (u UserPrivilegeString) PrivilegeString() string {
 
 // Show returns the list of {username, privileges} sorted by username.
 // 'privileges' is a string of comma-separated sorted privilege names.
-func (p PrivilegeDescriptor) Show() []UserPrivilegeString {
+func (p PrivilegeDescriptor) Show(objectType privilege.ObjectType) []UserPrivilegeString {
 	ret := make([]UserPrivilegeString, 0, len(p.Users))
 	for _, userPriv := range p.Users {
 		ret = append(ret, UserPrivilegeString{
 			User:       userPriv.User,
-			Privileges: privilege.ListFromBitField(userPriv.Privileges).SortedNames(),
+			Privileges: privilege.ListFromBitField(userPriv.Privileges, objectType).SortedNames(),
 		})
 	}
 	return ret
@@ -323,7 +357,7 @@ func (p PrivilegeDescriptor) CheckPrivilege(user string, priv privilege.Kind) bo
 		// User "node" has all privileges.
 		return user == security.NodeUser
 	}
-	// ALL is always good.
+
 	if isPrivilegeSet(userPriv.Privileges, privilege.ALL) {
 		return true
 	}
@@ -380,6 +414,7 @@ var SystemAllowedPrivileges = map[ID]privilege.List{
 	keys.StatementDiagnosticsRequestsTableID:  privilege.ReadWriteData,
 	keys.StatementDiagnosticsTableID:          privilege.ReadWriteData,
 	keys.ScheduledJobsTableID:                 privilege.ReadWriteData,
+	keys.SqllivenessID:                        privilege.ReadWriteData,
 }
 
 // SetOwner sets the owner of the privilege descriptor to the provided string.

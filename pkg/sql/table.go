@@ -14,7 +14,6 @@ import (
 	"context"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -22,8 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -37,15 +36,11 @@ func (p *planner) getVirtualTabler() VirtualTabler {
 func (p *planner) createDropDatabaseJob(
 	ctx context.Context,
 	databaseID descpb.ID,
+	schemasToDrop []descpb.ID,
 	tableDropDetails []jobspb.DroppedTableDetails,
-	typesToDrop []*sqlbase.MutableTypeDescriptor,
+	typesToDrop []*typedesc.Mutable,
 	jobDesc string,
 ) error {
-	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.VersionSchemaChangeJob) {
-		if descs.MigrationSchemaChangeRequiredFromContext(ctx) {
-			return descs.ErrSchemaChangeDisallowedInMixedState
-		}
-	}
 	// TODO (lucy): This should probably be deleting the queued jobs for all the
 	// tables being dropped, so that we don't have duplicate schema changers.
 	tableIDs := make([]descpb.ID, 0, len(tableDropDetails))
@@ -56,36 +51,65 @@ func (p *planner) createDropDatabaseJob(
 	for _, t := range typesToDrop {
 		typeIDs = append(typeIDs, t.ID)
 	}
+	formatVersion := jobspb.DatabaseJobFormatVersion
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		formatVersion--
+	}
 	jobRecord := jobs.Record{
 		Description:   jobDesc,
 		Username:      p.User(),
 		DescriptorIDs: tableIDs,
 		Details: jobspb.SchemaChangeDetails{
+			DroppedSchemas:    schemasToDrop,
 			DroppedTables:     tableDropDetails,
 			DroppedTypes:      typeIDs,
 			DroppedDatabaseID: databaseID,
-			FormatVersion:     jobspb.JobResumerFormatVersion,
+			FormatVersion:     formatVersion,
 		},
 		Progress: jobspb.SchemaChangeProgress{},
 	}
-	_, err := p.extendedEvalCtx.QueueJob(jobRecord)
-	return err
+	newJob, err := p.extendedEvalCtx.QueueJob(jobRecord)
+	if err != nil {
+		return err
+	}
+	log.Infof(ctx, "queued new drop database job %d for database %d", *newJob.ID(), databaseID)
+	return nil
+}
+
+// createNonDropDatabaseChangeJob covers all database descriptor updates other
+// than dropping the database.
+// TODO (lucy): This should ideally look into the set of queued jobs so that we
+// don't queue multiple jobs for the same database.
+func (p *planner) createNonDropDatabaseChangeJob(
+	ctx context.Context, databaseID descpb.ID, jobDesc string,
+) error {
+	formatVersion := jobspb.DatabaseJobFormatVersion
+	if p.Descriptors().DatabaseLeasingUnsupported() {
+		formatVersion--
+	}
+	jobRecord := jobs.Record{
+		Description: jobDesc,
+		Username:    p.User(),
+		Details: jobspb.SchemaChangeDetails{
+			DescID:        databaseID,
+			FormatVersion: formatVersion,
+		},
+		Progress: jobspb.SchemaChangeProgress{},
+	}
+	newJob, err := p.extendedEvalCtx.QueueJob(jobRecord)
+	if err != nil {
+		return err
+	}
+	log.Infof(ctx, "queued new database schema change job %d for database %d", *newJob.ID(), databaseID)
+	return nil
 }
 
 // createOrUpdateSchemaChangeJob queues a new job for the schema change if there
 // is no existing schema change job for the table, or updates the existing job
 // if there is one.
 func (p *planner) createOrUpdateSchemaChangeJob(
-	ctx context.Context,
-	tableDesc *sqlbase.MutableTableDescriptor,
-	jobDesc string,
-	mutationID descpb.MutationID,
+	ctx context.Context, tableDesc *tabledesc.Mutable, jobDesc string, mutationID descpb.MutationID,
 ) error {
-	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.VersionSchemaChangeJob) {
-		if descs.MigrationSchemaChangeRequiredFromContext(ctx) {
-			return descs.ErrSchemaChangeDisallowedInMixedState
-		}
-	}
 	var job *jobs.Job
 	if cachedJob, ok := p.extendedEvalCtx.SchemaChangeJobCache[tableDesc.ID]; ok {
 		job = cachedJob
@@ -116,10 +140,12 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 			Username:      p.User(),
 			DescriptorIDs: descpb.IDs{tableDesc.GetID()},
 			Details: jobspb.SchemaChangeDetails{
-				TableID:        tableDesc.ID,
-				MutationID:     mutationID,
-				ResumeSpanList: spanList,
-				FormatVersion:  jobspb.JobResumerFormatVersion,
+				DescID:          tableDesc.ID,
+				TableMutationID: mutationID,
+				ResumeSpanList:  spanList,
+				// The version distinction for database jobs doesn't matter for jobs on
+				// tables.
+				FormatVersion: jobspb.DatabaseJobFormatVersion,
 			},
 			Progress: jobspb.SchemaChangeProgress{},
 		}
@@ -140,24 +166,26 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 		// Update the existing job.
 		oldDetails := job.Details().(jobspb.SchemaChangeDetails)
 		newDetails := jobspb.SchemaChangeDetails{
-			TableID:        tableDesc.ID,
-			MutationID:     oldDetails.MutationID,
-			ResumeSpanList: spanList,
-			FormatVersion:  jobspb.JobResumerFormatVersion,
+			DescID:          tableDesc.ID,
+			TableMutationID: oldDetails.TableMutationID,
+			ResumeSpanList:  spanList,
+			// The version distinction for database jobs doesn't matter for jobs on
+			// tables.
+			FormatVersion: jobspb.DatabaseJobFormatVersion,
 		}
-		if oldDetails.MutationID != descpb.InvalidMutationID {
+		if oldDetails.TableMutationID != descpb.InvalidMutationID {
 			// The previous queued schema change job was associated with a mutation,
 			// which must have the same mutation ID as this schema change, so just
 			// check for consistency.
-			if mutationID != descpb.InvalidMutationID && mutationID != oldDetails.MutationID {
+			if mutationID != descpb.InvalidMutationID && mutationID != oldDetails.TableMutationID {
 				return errors.AssertionFailedf(
 					"attempted to update job for mutation %d, but job already exists with mutation %d",
-					mutationID, oldDetails.MutationID)
+					mutationID, oldDetails.TableMutationID)
 			}
 		} else {
 			// The previous queued schema change job didn't have a mutation.
 			if mutationID != descpb.InvalidMutationID {
-				newDetails.MutationID = mutationID
+				newDetails.TableMutationID = mutationID
 				// Also add a MutationJob on the table descriptor.
 				// TODO (lucy): get rid of this when we get rid of MutationJobs.
 				tableDesc.MutationJobs = append(tableDesc.MutationJobs, descpb.TableDescriptor_MutationJob{
@@ -194,10 +222,7 @@ func (p *planner) createOrUpdateSchemaChangeJob(
 // table descriptor during a schema change to another table, or from a step in a
 // larger schema change to the same table.
 func (p *planner) writeSchemaChange(
-	ctx context.Context,
-	tableDesc *sqlbase.MutableTableDescriptor,
-	mutationID descpb.MutationID,
-	jobDesc string,
+	ctx context.Context, tableDesc *tabledesc.Mutable, mutationID descpb.MutationID, jobDesc string,
 ) error {
 	if !p.EvalContext().TxnImplicit {
 		telemetry.Inc(sqltelemetry.SchemaChangeInExplicitTxnCounter)
@@ -214,7 +239,7 @@ func (p *planner) writeSchemaChange(
 }
 
 func (p *planner) writeSchemaChangeToBatch(
-	ctx context.Context, tableDesc *sqlbase.MutableTableDescriptor, b *kv.Batch,
+	ctx context.Context, tableDesc *tabledesc.Mutable, b *kv.Batch,
 ) error {
 	if !p.EvalContext().TxnImplicit {
 		telemetry.Inc(sqltelemetry.SchemaChangeInExplicitTxnCounter)
@@ -228,7 +253,7 @@ func (p *planner) writeSchemaChangeToBatch(
 }
 
 func (p *planner) writeDropTable(
-	ctx context.Context, tableDesc *sqlbase.MutableTableDescriptor, queueJob bool, jobDesc string,
+	ctx context.Context, tableDesc *tabledesc.Mutable, queueJob bool, jobDesc string,
 ) error {
 	if queueJob {
 		if err := p.createOrUpdateSchemaChangeJob(ctx, tableDesc, jobDesc, descpb.InvalidMutationID); err != nil {
@@ -238,9 +263,7 @@ func (p *planner) writeDropTable(
 	return p.writeTableDesc(ctx, tableDesc)
 }
 
-func (p *planner) writeTableDesc(
-	ctx context.Context, tableDesc *sqlbase.MutableTableDescriptor,
-) error {
+func (p *planner) writeTableDesc(ctx context.Context, tableDesc *tabledesc.Mutable) error {
 	b := p.txn.NewBatch()
 	if err := p.writeTableDescToBatch(ctx, tableDesc, b); err != nil {
 		return err
@@ -249,7 +272,7 @@ func (p *planner) writeTableDesc(
 }
 
 func (p *planner) writeTableDescToBatch(
-	ctx context.Context, tableDesc *sqlbase.MutableTableDescriptor, b *kv.Batch,
+	ctx context.Context, tableDesc *tabledesc.Mutable, b *kv.Batch,
 ) error {
 	if tableDesc.IsVirtualTable() {
 		return errors.AssertionFailedf("virtual descriptors cannot be stored, found: %v", tableDesc)

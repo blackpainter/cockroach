@@ -20,8 +20,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -43,13 +44,13 @@ func gcTables(
 			continue
 		}
 
-		var table *sqlbase.ImmutableTableDescriptor
+		var table *tabledesc.Immutable
 		if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 			var err error
 			table, err = catalogkv.MustGetTableDescByID(ctx, txn, execCfg.Codec, droppedTable.ID)
 			return err
 		}); err != nil {
-			if errors.Is(err, sqlbase.ErrDescriptorNotFound) {
+			if errors.Is(err, catalog.ErrDescriptorNotFound) {
 				// This can happen if another GC job created for the same table got to
 				// the table first. See #50344.
 				log.Warningf(ctx, "table descriptor %d not found while attempting to GC, skipping", droppedTable.ID)
@@ -67,7 +68,7 @@ func gcTables(
 		}
 
 		// First, delete all the table data.
-		if err := clearTableData(ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, table); err != nil {
+		if err := ClearTableData(ctx, execCfg.DB, execCfg.DistSender, execCfg.Codec, table); err != nil {
 			return false, errors.Wrapf(err, "clearing data for table %d", table.ID)
 		}
 
@@ -83,13 +84,13 @@ func gcTables(
 	return didGC, nil
 }
 
-// clearTableData deletes all of the data in the specified table.
-func clearTableData(
+// ClearTableData deletes all of the data in the specified table.
+func ClearTableData(
 	ctx context.Context,
 	db *kv.DB,
 	distSender *kvcoord.DistSender,
 	codec keys.SQLCodec,
-	table *sqlbase.ImmutableTableDescriptor,
+	table *tabledesc.Immutable,
 ) error {
 	// If DropTime isn't set, assume this drop request is from a version
 	// 1.1 server and invoke legacy code that uses DeleteRange and range GC.

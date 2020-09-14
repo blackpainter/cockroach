@@ -22,8 +22,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -136,7 +136,7 @@ func TestIntArrayRoundTrip(t *testing.T) {
 
 	b := buf.wrapped.Bytes()
 
-	got, err := pgwirebase.DecodeOidDatum(nil, oid.T__int8, pgwirebase.FormatText, b[4:])
+	got, err := pgwirebase.DecodeOidDatum(context.Background(), nil, oid.T__int8, pgwirebase.FormatText, b[4:], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestByteArrayRoundTrip(t *testing.T) {
 	randValues := make(tree.Datums, 0, 11)
 	randValues = append(randValues, tree.NewDBytes(tree.DBytes("\x00abc\\\n")))
 	for i := 0; i < 10; i++ {
-		d := sqlbase.RandDatum(rng, types.Bytes, false /* nullOK */)
+		d := rowenc.RandDatum(rng, types.Bytes, false /* nullOK */)
 		randValues = append(randValues, d)
 	}
 
@@ -215,7 +215,7 @@ func TestByteArrayRoundTrip(t *testing.T) {
 					b := buf.wrapped.Bytes()
 					t.Logf("encoded: %v (%q)", b, b)
 
-					got, err := pgwirebase.DecodeOidDatum(nil, oid.T_bytea, pgwirebase.FormatText, b[4:])
+					got, err := pgwirebase.DecodeOidDatum(context.Background(), nil, oid.T_bytea, pgwirebase.FormatText, b[4:], nil)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -245,7 +245,7 @@ func TestCanWriteAllDatums(t *testing.T) {
 		buf := newWriteBuffer(nil /* bytecount */)
 
 		for i := 0; i < 10; i++ {
-			d := sqlbase.RandDatum(rng, typ, true)
+			d := rowenc.RandDatum(rng, typ, true)
 
 			buf.writeTextDatum(context.Background(), d, defaultConv, typ)
 			if buf.err != nil {
@@ -472,7 +472,8 @@ func BenchmarkDecodeBinaryDecimal(b *testing.B) {
 	}
 	wbuf.writeBinaryDatum(context.Background(), expected, nil /* sessionLoc */, nil /* t */)
 
-	rbuf := pgwirebase.ReadBuffer{Msg: wbuf.wrapped.Bytes()}
+	rbuf := pgwirebase.MakeReadBuffer()
+	rbuf.Msg = wbuf.wrapped.Bytes()
 
 	plen, err := rbuf.GetUint32()
 	if err != nil {
@@ -486,7 +487,7 @@ func BenchmarkDecodeBinaryDecimal(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StartTimer()
-		got, err := pgwirebase.DecodeOidDatum(nil, oid.T_numeric, pgwirebase.FormatBinary, bytes)
+		got, err := pgwirebase.DecodeOidDatum(context.Background(), nil, oid.T_numeric, pgwirebase.FormatBinary, bytes, nil)
 		b.StopTimer()
 		evalCtx := tree.NewTestingEvalContext(cluster.MakeTestingClusterSettings())
 		defer evalCtx.Stop(context.Background())

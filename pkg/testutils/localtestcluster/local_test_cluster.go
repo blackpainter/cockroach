@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -145,7 +145,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	ltc.dbContext = &kv.DBContext{
 		UserPriority: roachpb.NormalUserPriority,
 		Stopper:      ltc.stopper,
-		NodeID:       base.NewSQLIDContainer(0, &nodeIDContainer, true /* exposed */),
+		NodeID:       base.NewSQLIDContainer(0, &nodeIDContainer),
 	}
 	ltc.DB = kv.NewDBWithContext(cfg.AmbientCtx, factory, ltc.Clock, *ltc.dbContext)
 	transport := kvserver.NewDummyRaftTransport(cfg.Settings)
@@ -198,7 +198,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	var initialValues []roachpb.KeyValue
 	var splits []roachpb.RKey
 	if !ltc.DontCreateSystemRanges {
-		schema := sqlbase.MakeMetadataSchema(
+		schema := bootstrap.MakeMetadataSchema(
 			keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 		)
 		var tableSplits []roachpb.RKey
@@ -221,6 +221,13 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 		t.Fatalf("unable to start local test cluster: %s", err)
 	}
 
+	// The heartbeat loop depends on gossip to retrieve the node ID, so we're
+	// sure to set it first.
+	nc.Set(ctx, nodeDesc.NodeID)
+	if err := ltc.Gossip.SetNodeDescriptor(nodeDesc); err != nil {
+		t.Fatalf("unable to set node descriptor: %s", err)
+	}
+
 	if !ltc.DisableLivenessHeartbeat {
 		cfg.NodeLiveness.StartHeartbeat(ctx, ltc.stopper, []storage.Engine{ltc.Eng}, nil /* alive */)
 	}
@@ -230,10 +237,6 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 	}
 
 	ltc.Stores.AddStore(ltc.Store)
-	nc.Set(ctx, nodeDesc.NodeID)
-	if err := ltc.Gossip.SetNodeDescriptor(nodeDesc); err != nil {
-		t.Fatalf("unable to set node descriptor: %s", err)
-	}
 	ltc.Cfg = cfg
 }
 

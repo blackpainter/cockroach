@@ -23,12 +23,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -72,7 +74,7 @@ func (dc *Cache) setID(name string, id descpb.ID) {
 // getCachedDatabaseDesc looks up the database descriptor from the descriptor cache,
 // given its name. Returns nil and no error if the name is not present in the
 // cache.
-func (dc *Cache) getCachedDatabaseDesc(name string) (*sqlbase.ImmutableDatabaseDescriptor, error) {
+func (dc *Cache) getCachedDatabaseDesc(name string) (*dbdesc.Immutable, error) {
 	dbID, err := dc.GetCachedDatabaseID(name)
 	if dbID == descpb.InvalidID || err != nil {
 		return nil, err
@@ -83,17 +85,15 @@ func (dc *Cache) getCachedDatabaseDesc(name string) (*sqlbase.ImmutableDatabaseD
 
 // getCachedDatabaseDescByID looks up the database descriptor from the descriptor cache,
 // given its ID.
-func (dc *Cache) getCachedDatabaseDescByID(
-	id descpb.ID,
-) (*sqlbase.ImmutableDatabaseDescriptor, error) {
+func (dc *Cache) getCachedDatabaseDescByID(id descpb.ID) (*dbdesc.Immutable, error) {
 	if id == keys.SystemDatabaseID {
 		// We can't return a direct reference to SystemDB, because the
 		// caller expects a private object that can be modified in-place.
-		sysDB := sqlbase.MakeSystemDatabaseDesc()
+		sysDB := systemschema.MakeSystemDatabaseDesc()
 		return sysDB, nil
 	}
 
-	descKey := sqlbase.MakeDescMetadataKey(dc.codec, id)
+	descKey := catalogkeys.MakeDescMetadataKey(dc.codec, id)
 	descVal := dc.systemConfig.GetValue(descKey)
 	if descVal == nil {
 		return nil, nil
@@ -108,7 +108,7 @@ func (dc *Cache) getCachedDatabaseDescByID(
 	if dbDesc == nil {
 		return nil, pgerror.Newf(pgcode.WrongObjectType, "[%d] is not a database", id)
 	}
-	database := sqlbase.NewImmutableDatabaseDescriptor(*dbDesc)
+	database := dbdesc.NewImmutable(*dbDesc)
 	if err := database.Validate(); err != nil {
 		return nil, err
 	}
@@ -123,7 +123,7 @@ func (dc *Cache) GetDatabaseDesc(
 	txnRunner func(context.Context, func(context.Context, *kv.Txn) error) error,
 	name string,
 	required bool,
-) (*sqlbase.ImmutableDatabaseDescriptor, error) {
+) (*dbdesc.Immutable, error) {
 	// Lookup the database in the cache first, falling back to the KV store if it
 	// isn't present. The cache might cause the usage of a recently renamed
 	// database, but that's a race that could occur anyways.
@@ -149,7 +149,7 @@ func (dc *Cache) GetDatabaseDesc(
 				return err
 			}
 			if descI != nil {
-				desc = descI.(*sqlbase.ImmutableDatabaseDescriptor)
+				desc = descI.(*dbdesc.Immutable)
 			}
 			return nil
 		}); err != nil {
@@ -166,7 +166,7 @@ func (dc *Cache) GetDatabaseDesc(
 // if it exists in the cache, otherwise falls back to KV operations.
 func (dc *Cache) GetDatabaseDescByID(
 	ctx context.Context, txn *kv.Txn, id descpb.ID,
-) (*sqlbase.ImmutableDatabaseDescriptor, error) {
+) (*dbdesc.Immutable, error) {
 	desc, err := dc.getCachedDatabaseDescByID(id)
 	if desc == nil || err != nil {
 		if err != nil {
@@ -175,40 +175,6 @@ func (dc *Cache) GetDatabaseDescByID(
 		desc, err = catalogkv.MustGetDatabaseDescByID(ctx, txn, dc.codec, id)
 	}
 	return desc, err
-}
-
-// GetDatabaseID returns the ID of a database given its name. It
-// uses the descriptor cache if possible, otherwise falls back to KV
-// operations.
-func (dc *Cache) GetDatabaseID(
-	ctx context.Context,
-	txnRunner func(context.Context, func(context.Context, *kv.Txn) error) error,
-	name string,
-	required bool,
-) (descpb.ID, error) {
-	dbID, err := dc.GetCachedDatabaseID(name)
-	if err != nil {
-		return dbID, err
-	}
-	if dbID == descpb.InvalidID {
-		if err := txnRunner(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			// Run the namespace read as high-priority, thereby pushing any intents out
-			// of its way. We don't want schema changes to prevent database acquisitions;
-			// we'd rather force them to refresh. Also this prevents deadlocks in cases
-			// where the name resolution is triggered by the transaction doing the
-			// schema change itself.
-			if err := txn.SetUserPriority(roachpb.MaxUserPriority); err != nil {
-				return err
-			}
-			var err error
-			dbID, err = catalogkv.GetDatabaseID(ctx, txn, dc.codec, name, required)
-			return err
-		}); err != nil {
-			return descpb.InvalidID, err
-		}
-	}
-	dc.setID(name, dbID)
-	return dbID, nil
 }
 
 // GetCachedDatabaseID returns the ID of a database given its name
@@ -220,16 +186,16 @@ func (dc *Cache) GetCachedDatabaseID(name string) (descpb.ID, error) {
 		return id, nil
 	}
 
-	if name == sqlbase.SystemDB.GetName() {
-		return sqlbase.SystemDB.GetID(), nil
+	if name == systemschema.SystemDB.GetName() {
+		return systemschema.SystemDB.GetID(), nil
 	}
 
-	var nameKey sqlbase.DescriptorKey = sqlbase.NewDatabaseKey(name)
+	var nameKey catalogkeys.DescriptorKey = catalogkeys.NewDatabaseKey(name)
 	nameVal := dc.systemConfig.GetValue(nameKey.Key(dc.codec))
 	if nameVal == nil {
 		// Try the deprecated system.namespace before returning InvalidID.
 		// TODO(solon): This can be removed in 20.2.
-		nameKey = sqlbase.NewDeprecatedDatabaseKey(name)
+		nameKey = catalogkeys.NewDeprecatedDatabaseKey(name)
 		nameVal = dc.systemConfig.GetValue(nameKey.Key(dc.codec))
 		if nameVal == nil {
 			return descpb.InvalidID, nil

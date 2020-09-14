@@ -1,9 +1,7 @@
-# LogicTest: !3node-tenant(50049)
-
 statement ok
 SET DATABASE = ""
 
-statement error no database specified
+statement error no database or schema specified
 CREATE TABLE a (id INT PRIMARY KEY)
 
 statement error invalid table name: test.""
@@ -240,10 +238,10 @@ query TTTTB colnames
 SHOW CONSTRAINTS FROM test.dupe_generated
 ----
 table_name      constraint_name  constraint_type  details             validated
-dupe_generated  check_bar        CHECK            CHECK ((bar > 2:::INT8))   true
-dupe_generated  check_foo        CHECK            CHECK ((foo > 2:::INT8))   true
-dupe_generated  check_foo1       CHECK            CHECK ((foo < 10:::INT8))  true
-dupe_generated  check_foo2       CHECK            CHECK ((foo > 1:::INT8))   true
+dupe_generated  check_bar        CHECK            CHECK ((bar > 2))   true
+dupe_generated  check_foo        CHECK            CHECK ((foo > 2))   true
+dupe_generated  check_foo1       CHECK            CHECK ((foo < 10))  true
+dupe_generated  check_foo2       CHECK            CHECK ((foo > 1))   true
 
 statement ok
 CREATE TABLE test.named_constraints (
@@ -291,7 +289,7 @@ SHOW CONSTRAINTS FROM test.named_constraints
 ----
 table_name         constraint_name  constraint_type  details                                    validated
 named_constraints  bar              UNIQUE           UNIQUE (id ASC, name ASC)                  true
-named_constraints  ck1              CHECK            CHECK ((length(nickname) < 10:::INT8))     true
+named_constraints  ck1              CHECK            CHECK ((length(nickname) < 10))            true
 named_constraints  ck2              CHECK            CHECK ((length(nickname) < length(name)))  true
 named_constraints  pk               PRIMARY KEY      PRIMARY KEY (id ASC)                       true
 named_constraints  uq               UNIQUE           UNIQUE (email ASC)                         true
@@ -560,6 +558,7 @@ node_queries                       NULL
 node_runtime_info                  NULL
 node_sessions                      NULL
 node_statement_statistics          NULL
+node_transaction_statistics        NULL
 node_transactions                  NULL
 node_txn_stats                     NULL
 partitions                         NULL
@@ -578,6 +577,7 @@ administrable_role_authorizations  NULL
 applicable_roles                   NULL
 check_constraints                  NULL
 column_privileges                  NULL
+column_udt_usage                   NULL
 columns                            NULL
 constraint_column_usage            NULL
 enabled_roles                      NULL

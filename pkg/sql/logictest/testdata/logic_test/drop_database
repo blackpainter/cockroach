@@ -1,4 +1,6 @@
-# LogicTest: local
+# LogicTest: default-configs local-mixed-20.1-20.2
+# The mixed configuration is enabled to test backward compatibility for database
+# schema changes.
 
 statement ok
 CREATE DATABASE "foo-bar"
@@ -35,7 +37,7 @@ system
 test
 
 query TT
-SELECT job_type, status FROM [SHOW JOBS]
+SELECT job_type, status FROM [SHOW JOBS] WHERE user_name = 'root'
 ----
 SCHEMA CHANGE       succeeded
 SCHEMA CHANGE GC    running

@@ -25,12 +25,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/faketreeeval"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowflow"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/opentracing/opentracing-go"
 )
 
@@ -119,7 +120,7 @@ func (ds *ServerImpl) Start() {
 // Drain changes the node's draining state through gossip and drains the
 // server's flowRegistry. See flowRegistry.Drain for more details.
 func (ds *ServerImpl) Drain(
-	ctx context.Context, flowDrainWait time.Duration, reporter func(int, string),
+	ctx context.Context, flowDrainWait time.Duration, reporter func(int, redact.SafeString),
 ) {
 	if err := ds.setDraining(true); err != nil {
 		log.Warningf(ctx, "unable to gossip distsql draining state: %s", err)
@@ -317,14 +318,15 @@ func (ds *ServerImpl) setupFlow(
 			// Most processors will override this Context with their own context in
 			// ProcessorBase. StartInternal().
 			Context:            ctx,
-			Planner:            &sqlbase.DummyEvalPlanner{},
-			PrivilegedAccessor: &sqlbase.DummyPrivilegedAccessor{},
-			SessionAccessor:    &sqlbase.DummySessionAccessor{},
-			ClientNoticeSender: &sqlbase.DummyClientNoticeSender{},
-			Sequence:           &sqlbase.DummySequenceOperators{},
-			Tenant:             &sqlbase.DummyTenantOperator{},
+			Planner:            &faketreeeval.DummyEvalPlanner{},
+			PrivilegedAccessor: &faketreeeval.DummyPrivilegedAccessor{},
+			SessionAccessor:    &faketreeeval.DummySessionAccessor{},
+			ClientNoticeSender: &faketreeeval.DummyClientNoticeSender{},
+			Sequence:           &faketreeeval.DummySequenceOperators{},
+			Tenant:             &faketreeeval.DummyTenantOperator{},
 			InternalExecutor:   ie,
 			Txn:                leafTxn,
+			SQLLivenessReader:  ds.ServerConfig.SQLLivenessReader,
 		}
 		evalCtx.SetStmtTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.StmtTimestampNanos))
 		evalCtx.SetTxnTimestamp(timeutil.Unix(0 /* sec */, req.EvalContext.TxnTimestampNanos))
@@ -340,7 +342,7 @@ func (ds *ServerImpl) setupFlow(
 	}
 
 	// Create the FlowCtx for the flow.
-	flowCtx := ds.NewFlowContext(req.Flow.FlowID, evalCtx, req.TraceKV, localState)
+	flowCtx := ds.NewFlowContext(ctx, req.Flow.FlowID, evalCtx, req.TraceKV, localState)
 
 	// req always contains the desired vectorize mode, regardless of whether we
 	// have non-nil localState.EvalContext. We don't want to update EvalContext
@@ -381,7 +383,7 @@ func (ds *ServerImpl) setupFlow(
 	// localState.Txn. Otherwise, we create a txn based on the request's
 	// LeafTxnInputState.
 	var txn *kv.Txn
-	if localState.IsLocal && !f.ConcurrentExecution() {
+	if localState.IsLocal && !f.ConcurrentTxnUse() {
 		txn = localState.Txn
 	} else {
 		// If I haven't created the leaf already, do it now.
@@ -409,7 +411,11 @@ func (ds *ServerImpl) setupFlow(
 // NewFlowContext creates a new FlowCtx that can be used during execution of
 // a flow.
 func (ds *ServerImpl) NewFlowContext(
-	id execinfrapb.FlowID, evalCtx *tree.EvalContext, traceKV bool, localState LocalState,
+	ctx context.Context,
+	id execinfrapb.FlowID,
+	evalCtx *tree.EvalContext,
+	traceKV bool,
+	localState LocalState,
 ) execinfra.FlowCtx {
 	// TODO(radu): we should sanity check some of these fields.
 	flowCtx := execinfra.FlowCtx{
@@ -434,7 +440,9 @@ func (ds *ServerImpl) NewFlowContext(
 		// If we weren't passed a descs.Collection, then make a new one. We are
 		// responsible for cleaning it up and releasing any accessed descriptors
 		// on flow cleanup.
-		collection := descs.NewCollection(ds.ServerConfig.LeaseManager.(*lease.Manager), ds.ServerConfig.Settings)
+		collection := descs.NewCollection(ctx, ds.ServerConfig.Settings,
+			ds.ServerConfig.LeaseManager.(*lease.Manager),
+			ds.ServerConfig.HydratedTables)
 		flowCtx.TypeResolverFactory = &descs.DistSQLTypeResolverFactory{
 			Descriptors: collection,
 			CleanupFunc: func(ctx context.Context) {
@@ -644,7 +652,7 @@ func (ie *lazyInternalExecutor) QueryRowEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	opts sqlbase.InternalExecutorSessionDataOverride,
+	opts sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (tree.Datums, error) {

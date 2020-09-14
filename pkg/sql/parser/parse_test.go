@@ -81,6 +81,10 @@ func TestParse(t *testing.T) {
 		{`CREATE DATABASE IF NOT EXISTS a TEMPLATE = 'template0' ENCODING = 'UTF8' LC_COLLATE = 'C.UTF-8' LC_CTYPE = 'INVALID'`},
 		{`CREATE SCHEMA IF NOT EXISTS foo`},
 		{`CREATE SCHEMA foo`},
+		{`CREATE SCHEMA IF NOT EXISTS foo AUTHORIZATION foobar`},
+		{`CREATE SCHEMA foo AUTHORIZATION foobar`},
+		{`CREATE SCHEMA IF NOT EXISTS AUTHORIZATION foobar`},
+		{`CREATE SCHEMA AUTHORIZATION foobar`},
 
 		{`CREATE INDEX a ON b (c)`},
 		{`CREATE INDEX CONCURRENTLY a ON b (c)`},
@@ -106,9 +110,11 @@ func TestParse(t *testing.T) {
 		{`CREATE INVERTED INDEX a ON b (c) WHERE d > 3`},
 		{`CREATE INVERTED INDEX a ON b (c) INTERLEAVE IN PARENT d (e)`},
 		{`CREATE INVERTED INDEX IF NOT EXISTS a ON b (c) WHERE d > 3`},
+		{`CREATE INDEX a ON b (c) WITH (fillfactor = 100, y_bounds = 50)`},
 
 		{`CREATE TABLE a ()`},
 		{`CREATE TEMPORARY TABLE a (b INT8)`},
+		{`CREATE UNLOGGED TABLE a (b INT8)`},
 		{`EXPLAIN CREATE TABLE a ()`},
 		{`CREATE TABLE a (b INT8)`},
 		{`CREATE TABLE a (b INT8, c INT8)`},
@@ -125,6 +131,7 @@ func TestParse(t *testing.T) {
 		{`CREATE TABLE a (b TIMETZ)`},
 		{`CREATE TABLE a (b TIME(3))`},
 		{`CREATE TABLE a (b TIMETZ(3))`},
+		{`CREATE TABLE a (b BOX2D)`},
 		{`CREATE TABLE a (b GEOGRAPHY)`},
 		{`CREATE TABLE a (b GEOGRAPHY(POINT))`},
 		{`CREATE TABLE a (b GEOGRAPHY(POINT,4326))`},
@@ -313,6 +320,12 @@ func TestParse(t *testing.T) {
 		{`CREATE VIEW a (x, y) AS VALUES (1, 'one'), (2, 'two')`},
 		{`CREATE VIEW a AS TABLE b`},
 		{`CREATE TEMPORARY VIEW a AS SELECT b`},
+		{`CREATE MATERIALIZED VIEW a AS SELECT * FROM b`},
+		{`CREATE MATERIALIZED VIEW IF NOT EXISTS a AS SELECT * FROM b`},
+		{`REFRESH MATERIALIZED VIEW a.b`},
+		{`REFRESH MATERIALIZED VIEW CONCURRENTLY a.b`},
+		{`REFRESH MATERIALIZED VIEW a.b WITH DATA`},
+		{`REFRESH MATERIALIZED VIEW a.b WITH NO DATA`},
 
 		{`CREATE SEQUENCE a`},
 		{`EXPLAIN CREATE SEQUENCE a`},
@@ -422,6 +435,8 @@ func TestParse(t *testing.T) {
 		{`DROP VIEW IF EXISTS a, b RESTRICT`},
 		{`DROP VIEW a.b CASCADE`},
 		{`DROP VIEW a, b CASCADE`},
+		{`DROP MATERIALIZED VIEW a, b`},
+		{`DROP MATERIALIZED VIEW IF EXISTS a`},
 		{`DROP SEQUENCE a`},
 		{`EXPLAIN DROP SEQUENCE a`},
 		{`DROP SEQUENCE a.b`},
@@ -501,6 +516,8 @@ func TestParse(t *testing.T) {
 		{`EXPLAIN SHOW DATABASES`},
 		{`SHOW ENUMS`},
 		{`EXPLAIN SHOW ENUMS`},
+		{`SHOW TYPES`},
+		{`EXPLAIN SHOW TYPES`},
 		{`SHOW SCHEMAS`},
 		{`EXPLAIN SHOW SCHEMAS`},
 		{`SHOW SCHEMAS FROM a`},
@@ -585,6 +602,7 @@ func TestParse(t *testing.T) {
 		{`SHOW ZONE CONFIGURATION FOR RANGE meta`},
 		{`SHOW ZONE CONFIGURATION FOR DATABASE db`},
 		{`SHOW ZONE CONFIGURATION FOR TABLE db.t`},
+		{`SHOW ZONE CONFIGURATION FOR TABLE db.schema.t`},
 		{`SHOW ZONE CONFIGURATION FOR PARTITION p OF TABLE db.t`},
 		{`SHOW ZONE CONFIGURATION FOR TABLE t`},
 		{`SHOW ZONE CONFIGURATION FOR PARTITION p OF TABLE t`},
@@ -675,6 +693,16 @@ func TestParse(t *testing.T) {
 		{`GRANT rolea, roleb TO usera, userb`},
 		{`GRANT rolea, roleb TO usera, userb WITH ADMIN OPTION`},
 
+		// GRANT ON TYPE.
+		{`GRANT USAGE ON TYPE foo TO root`},
+		{`GRANT USAGE, GRANT ON TYPE foo TO root`},
+		{`GRANT ALL ON TYPE foo TO root`},
+
+		// GRANT ON SCHEMA.
+		{`GRANT USAGE ON SCHEMA foo TO root`},
+		{`GRANT USAGE, GRANT, CREATE ON SCHEMA foo TO root`},
+		{`GRANT ALL ON SCHEMA foo, bar, baz TO root`},
+
 		// Tables are the default, but can also be specified with
 		// REVOKE x ON TABLE y. However, the stringer does not output TABLE.
 		{`REVOKE SELECT ON TABLE foo FROM root`},
@@ -685,6 +713,16 @@ func TestParse(t *testing.T) {
 		{`REVOKE SELECT, INSERT ON DATABASE db1, db2 FROM foo, bar, baz`},
 		{`REVOKE rolea, roleb FROM usera, userb`},
 		{`REVOKE ADMIN OPTION FOR rolea, roleb FROM usera, userb`},
+
+		// REVOKE ON TYPE.
+		{`REVOKE USAGE ON TYPE foo FROM root`},
+		{`REVOKE USAGE, GRANT ON TYPE foo FROM root`},
+		{`REVOKE ALL ON TYPE foo FROM root`},
+
+		// REVOKE ON SCHEMA.
+		{`REVOKE USAGE ON SCHEMA foo FROM root`},
+		{`REVOKE USAGE, GRANT, CREATE ON SCHEMA foo FROM root`},
+		{`REVOKE ALL ON SCHEMA foo, bar, baz FROM root`},
 
 		{`INSERT INTO a VALUES (1)`},
 		{`EXPLAIN INSERT INTO a VALUES (1)`},
@@ -718,8 +756,9 @@ func TestParse(t *testing.T) {
 
 		{`INSERT INTO a VALUES (1) ON CONFLICT DO NOTHING`},
 		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO NOTHING`},
-		{`INSERT INTO a VALUES (1) ON CONFLICT DO UPDATE SET a = 1`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) WHERE b > 0 DO NOTHING`},
 		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1`},
+		{`INSERT INTO a VALUES (1) ON CONFLICT (a) WHERE b > 0 DO UPDATE SET a = 1`},
 		{`INSERT INTO a VALUES (1) ON CONFLICT (a, b) DO UPDATE SET a = 1`},
 		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1, b = excluded.a`},
 		{`INSERT INTO a VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 1 WHERE b > 2`},
@@ -837,6 +876,7 @@ func TestParse(t *testing.T) {
 		{`SELECT 'foo'::TIME(6)`},
 		{`SELECT '0'::INTERVAL`},
 
+		{`SELECT 'foo'::BOX2D`},
 		{`SELECT 'foo'::GEOGRAPHY`},
 		{`SELECT 'foo'::GEOGRAPHY(POINT,4326)`},
 		{`SELECT 'foo'::GEOGRAPHY(POINT)`},
@@ -1155,6 +1195,9 @@ func TestParse(t *testing.T) {
 		{`SET TRANSACTION PRIORITY NORMAL`},
 		{`SET TRANSACTION PRIORITY HIGH`},
 		{`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, PRIORITY HIGH`},
+		{`SET TRANSACTION DEFERRABLE`},
+		{`SET TRANSACTION NOT DEFERRABLE`},
+		{`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, PRIORITY HIGH, AS OF SYSTEM TIME '-1s', NOT DEFERRABLE`},
 
 		{`SET TRACING = off`},
 		{`EXPLAIN SET TRACING = off`},
@@ -1248,6 +1291,8 @@ func TestParse(t *testing.T) {
 		{`ALTER DATABASE a RENAME TO b`},
 		{`EXPLAIN ALTER DATABASE a RENAME TO b`},
 
+		{`ALTER DATABASE a OWNER TO foo`},
+
 		{`ALTER INDEX b RENAME TO b`},
 		{`EXPLAIN ALTER INDEX b RENAME TO b`},
 		{`ALTER INDEX a@b RENAME TO b`},
@@ -1257,6 +1302,7 @@ func TestParse(t *testing.T) {
 		{`ALTER INDEX IF EXISTS a@primary RENAME TO like`},
 
 		{`ALTER SCHEMA s RENAME TO s2`},
+		{`ALTER SCHEMA s OWNER TO foo`},
 
 		{`ALTER TABLE a RENAME TO b`},
 		{`EXPLAIN ALTER TABLE a RENAME TO b`},
@@ -1314,8 +1360,18 @@ func TestParse(t *testing.T) {
 		{`ALTER TABLE a SET SCHEMA s`},
 		{`ALTER TABLE IF EXISTS a SET SCHEMA s`},
 
+		{`ALTER TABLE a OWNER TO foo`},
+		{`ALTER TABLE IF EXISTS a OWNER TO foo`},
+
 		{`ALTER VIEW v SET SCHEMA s`},
 		{`ALTER VIEW IF EXISTS a SET SCHEMA s`},
+		{`ALTER MATERIALIZED VIEW v SET SCHEMA s`},
+		{`ALTER MATERIALIZED VIEW IF EXISTS a SET SCHEMA s`},
+
+		{`ALTER VIEW v RENAME TO v`},
+		{`ALTER VIEW IF EXISTS v RENAME TO v`},
+		{`ALTER MATERIALIZED VIEW v RENAME TO v`},
+		{`ALTER MATERIALIZED VIEW IF EXISTS v RENAME TO v`},
 
 		{`ALTER SEQUENCE seq SET SCHEMA s`},
 		{`ALTER SEQUENCE IF EXISTS seq SET SCHEMA s`},
@@ -1446,6 +1502,7 @@ func TestParse(t *testing.T) {
 		{`ALTER TYPE t RENAME VALUE 'value1' TO 'value2'`},
 		{`ALTER TYPE t RENAME TO t2`},
 		{`ALTER TYPE t SET SCHEMA newschema`},
+		{`ALTER TYPE t OWNER TO foo`},
 
 		{`COMMENT ON COLUMN a.b IS 'a'`},
 		{`COMMENT ON COLUMN a.b IS NULL`},
@@ -1486,13 +1543,15 @@ func TestParse(t *testing.T) {
 		{`BACKUP TABLE foo TO 'bar'`},
 		{`BACKUP TABLE foo INTO 'bar'`},
 		{`BACKUP TABLE foo INTO LATEST IN 'bar'`},
-		{`CREATE SCHEDULE FOR BACKUP TABLE foo TO 'bar' RECURRING NEVER`},
-		{`CREATE SCHEDULE 'my schedule' FOR BACKUP TABLE foo TO 'bar' RECURRING NEVER`},
-		{`CREATE SCHEDULE FOR BACKUP TABLE foo TO 'bar' RECURRING '@daily'`},
-		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz TO 'bar' RECURRING '@daily' FULL BACKUP ALWAYS`},
-		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz TO 'bar' RECURRING '@daily' FULL BACKUP '@weekly'`},
-		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz TO 'bar' WITH revision_history RECURRING '@daily' FULL BACKUP '@weekly'`},
-		{`CREATE SCHEDULE FOR BACKUP TO 'bar' WITH revision_history RECURRING '@daily' FULL BACKUP '@weekly' WITH EXPERIMENTAL SCHEDULE OPTIONS foo = 'bar'`},
+		{`BACKUP TABLE foo INTO 'subdir' IN 'bar'`},
+		{`BACKUP TABLE foo INTO $1 IN $2`},
+		{`CREATE SCHEDULE FOR BACKUP TABLE foo INTO 'bar' RECURRING '@hourly'`},
+		{`CREATE SCHEDULE 'my schedule' FOR BACKUP TABLE foo INTO 'bar' RECURRING '@daily'`},
+		{`CREATE SCHEDULE FOR BACKUP TABLE foo INTO 'bar' RECURRING '@daily'`},
+		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz INTO 'bar' RECURRING '@daily' FULL BACKUP ALWAYS`},
+		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz INTO 'bar' RECURRING '@daily' FULL BACKUP '@weekly'`},
+		{`CREATE SCHEDULE FOR BACKUP TABLE foo, bar, buz INTO 'bar' WITH revision_history RECURRING '@daily' FULL BACKUP '@weekly'`},
+		{`CREATE SCHEDULE FOR BACKUP INTO 'bar' WITH revision_history RECURRING '@daily' FULL BACKUP '@weekly' WITH SCHEDULE OPTIONS foo = 'bar'`},
 		{`EXPLAIN BACKUP TABLE foo TO 'bar'`},
 		{`BACKUP TABLE foo.foo, baz.baz TO 'bar'`},
 
@@ -1502,6 +1561,11 @@ func TestParse(t *testing.T) {
 		{`SHOW BACKUP RANGES 'bar'`},
 		{`SHOW BACKUP FILES 'bar'`},
 		{`SHOW BACKUP FILES 'bar' WITH foo = 'bar'`},
+
+		{`SHOW BACKUPS IN 'bar'`},
+		{`SHOW BACKUPS IN $1`},
+		{`SHOW BACKUP 'foo' IN 'bar'`},
+		{`SHOW BACKUP $1 IN $2 WITH foo = 'bar'`},
 
 		{`BACKUP TABLE foo TO 'bar' AS OF SYSTEM TIME '1' INCREMENTAL FROM 'baz'`},
 		{`BACKUP TABLE foo TO $1 INCREMENTAL FROM 'bar', $2, 'baz'`},
@@ -1540,7 +1604,7 @@ func TestParse(t *testing.T) {
 		{`RESTORE TENANT 36 FROM ($1, $2) AS OF SYSTEM TIME '1'`},
 
 		{`BACKUP TABLE foo TO 'bar' WITH revision_history, detached`},
-		{`RESTORE TABLE foo FROM 'bar' WITH key1, key2 = 'value'`},
+		{`RESTORE TABLE foo FROM 'bar' WITH skip_missing_foreign_keys, skip_missing_sequences, detached`},
 
 		{`IMPORT TABLE foo CREATE USING 'nodelocal://0/some/file' CSV DATA ('path/to/some/file', $1) WITH temp = 'path/to/temp'`},
 		{`EXPLAIN IMPORT TABLE foo CREATE USING 'nodelocal://0/some/file' CSV DATA ('path/to/some/file', $1) WITH temp = 'path/to/temp'`},
@@ -2013,6 +2077,14 @@ $function$`,
 		// FOR READ ONLY is ignored, like in Postgres.
 		{`SELECT 1 FOR READ ONLY`, `SELECT 1`},
 
+		{`UPDATE ONLY a SET b = 3`, `UPDATE a SET b = 3`},
+		{`UPDATE ONLY a * SET b = 3`, `UPDATE a SET b = 3`},
+		{`UPDATE a * SET b = 3`, `UPDATE a SET b = 3`},
+
+		{`DELETE FROM ONLY a WHERE a = b`, `DELETE FROM a WHERE a = b`},
+		{`DELETE FROM a * WHERE a = b`, `DELETE FROM a WHERE a = b`},
+		{`DELETE FROM ONLY a * WHERE a = b`, `DELETE FROM a WHERE a = b`},
+
 		{`SHOW CREATE TABLE t`,
 			`SHOW CREATE t`},
 		{`SHOW CREATE VIEW t`,
@@ -2121,6 +2193,8 @@ $function$`,
 
 		{`SHOW SESSIONS`, `SHOW CLUSTER SESSIONS`},
 		{`SHOW ALL SESSIONS`, `SHOW ALL CLUSTER SESSIONS`},
+		{`SHOW TRANSACTIONS`, `SHOW CLUSTER TRANSACTIONS`},
+		{`SHOW ALL TRANSACTIONS`, `SHOW ALL CLUSTER TRANSACTIONS`},
 		{`SHOW QUERIES`, `SHOW CLUSTER QUERIES`},
 		{`SHOW ALL QUERIES`, `SHOW ALL CLUSTER QUERIES`},
 
@@ -2239,8 +2313,14 @@ $function$`,
 			`BACKUP TABLE foo TO 'bar' WITH revision_history, encryption_passphrase='secret', detached`},
 		{`BACKUP foo TO 'bar' WITH OPTIONS (detached, KMS = ('foo', 'bar'), revision_history)`,
 			`BACKUP TABLE foo TO 'bar' WITH revision_history, detached, kms=('foo', 'bar')`},
-		{`RESTORE foo FROM 'bar' WITH key1, key2 = 'value'`,
-			`RESTORE TABLE foo FROM 'bar' WITH key1, key2 = 'value'`},
+
+		{`RESTORE foo FROM 'bar' WITH OPTIONS (encryption_passphrase='secret', into_db='baz',
+skip_missing_foreign_keys, skip_missing_sequences, skip_missing_sequence_owners, skip_missing_views, detached)`,
+			`RESTORE TABLE foo FROM 'bar' WITH encryption_passphrase='secret', into_db='baz', skip_missing_foreign_keys, skip_missing_sequence_owners, skip_missing_sequences, skip_missing_views, detached`},
+		{`RESTORE foo FROM 'bar' WITH ENCRYPTION_PASSPHRASE = 'secret', INTO_DB=baz,
+SKIP_MISSING_FOREIGN_KEYS, SKIP_MISSING_SEQUENCES, SKIP_MISSING_SEQUENCE_OWNERS, SKIP_MISSING_VIEWS`,
+			`RESTORE TABLE foo FROM 'bar' WITH encryption_passphrase='secret', into_db='baz', skip_missing_foreign_keys, skip_missing_sequence_owners, skip_missing_sequences, skip_missing_views`},
+
 		{`CREATE CHANGEFEED FOR foo INTO 'sink'`, `CREATE CHANGEFEED FOR TABLE foo INTO 'sink'`},
 
 		{`GRANT SELECT ON foo TO root`,
@@ -2262,6 +2342,18 @@ $function$`,
 			`CREATE ROLE 'foo'`},
 		{`CREATE ROLE IF NOT EXISTS foo`,
 			`CREATE ROLE IF NOT EXISTS 'foo'`},
+		{`CREATE ROLE foo WITH CREATEDB`,
+			`CREATE ROLE 'foo' WITH CREATEDB`},
+		{`CREATE ROLE IF NOT EXISTS foo WITH CREATEDB`,
+			`CREATE ROLE IF NOT EXISTS 'foo' WITH CREATEDB`},
+		{`CREATE ROLE foo CREATEDB`,
+			`CREATE ROLE 'foo' WITH CREATEDB`},
+		{`CREATE ROLE IF NOT EXISTS foo CREATEDB`,
+			`CREATE ROLE IF NOT EXISTS 'foo' WITH CREATEDB`},
+		{`ALTER ROLE foo WITH CREATEDB`,
+			`ALTER ROLE 'foo' WITH CREATEDB`},
+		{`ALTER ROLE foo CREATEDB`,
+			`ALTER ROLE 'foo' WITH CREATEDB`},
 		{`CREATE ROLE foo WITH CREATEROLE`,
 			`CREATE ROLE 'foo' WITH CREATEROLE`},
 		{`CREATE ROLE IF NOT EXISTS foo WITH CREATEROLE`,
@@ -2274,6 +2366,10 @@ $function$`,
 			`ALTER ROLE 'foo' WITH CREATEROLE`},
 		{`ALTER ROLE foo CREATEROLE`,
 			`ALTER ROLE 'foo' WITH CREATEROLE`},
+		{`ALTER ROLE foo CREATELOGIN`,
+			`ALTER ROLE 'foo' WITH CREATELOGIN`},
+		{`ALTER ROLE foo NOCREATELOGIN`,
+			`ALTER ROLE 'foo' WITH NOCREATELOGIN`},
 		{`DROP ROLE foo, bar`,
 			`DROP ROLE 'foo', 'bar'`},
 		{`DROP ROLE IF EXISTS foo, bar`,
@@ -2487,6 +2583,9 @@ $function$`,
 		{`SELECT 1::int4.typ array [1]`, `SELECT 1::int4.typ[]`},
 		{`SELECT 1::db.int4.typ array`, `SELECT 1::db.int4.typ[]`},
 		{`CREATE TABLE t (x int4.type array [1])`, `CREATE TABLE t (x int4.type[])`},
+
+		{`ALTER TYPE t OWNER TO CURRENT_USER`, "ALTER TYPE t OWNER TO \"current_user\""},
+		{`ALTER TYPE t OWNER TO SESSION_USER`, "ALTER TYPE t OWNER TO \"session_user\""},
 	}
 	for _, d := range testData {
 		t.Run(d.sql, func(t *testing.T) {
@@ -2841,7 +2940,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE FUNCTION a`, 17511, `create`, ``},
 		{`CREATE OR REPLACE FUNCTION a`, 17511, `create`, ``},
 		{`CREATE LANGUAGE a`, 17511, `create language a`, ``},
-		{`CREATE MATERIALIZED VIEW a`, 41649, ``, ``},
 		{`CREATE OPERATOR a`, 0, `create operator`, ``},
 		{`CREATE PUBLICATION a`, 0, `create publication`, ``},
 		{`CREATE RULE a`, 0, `create rule`, ``},
@@ -2876,8 +2974,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`SET CONSTRAINTS foo`, 0, `set constraints`, ``},
 		{`SET LOCAL foo = bar`, 32562, ``, ``},
 		{`SET foo FROM CURRENT`, 0, `set from current`, ``},
-
-		{`CREATE UNLOGGED TABLE a(b INT8)`, 0, `create unlogged`, ``},
 
 		{`CREATE TABLE a(x INT[][])`, 32552, ``, ``},
 		{`CREATE TABLE a(x INT[1][2])`, 32552, ``, ``},
@@ -2923,9 +3019,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE TYPE a`, 27793, `shell`, ``},
 		{`CREATE DOMAIN a`, 27796, `create`, ``},
 
-		{`ALTER TYPE t OWNER TO hello`, 48700, `ALTER TYPE OWNER TO`, ``},
-		{`ALTER TYPE t OWNER TO CURRENT_USER`, 48700, `ALTER TYPE OWNER TO`, ``},
-		{`ALTER TYPE t OWNER TO SESSION_USER`, 48700, `ALTER TYPE OWNER TO`, ``},
 		{`ALTER TYPE db.t RENAME ATTRIBUTE foo TO bar`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
 		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
 		{`ALTER TYPE db.s.t ADD ATTRIBUTE foo bar COLLATE hello`, 48701, `ALTER TYPE ATTRIBUTE`, ``},
@@ -2985,8 +3078,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE TABLE a(b TXID_SNAPSHOT)`, 0, `txid_snapshot`, ``},
 		{`CREATE TABLE a(b XML)`, 0, `xml`, ``},
 
-		{`INSERT INTO a VALUES (1) ON CONFLICT (x) WHERE x > 3 DO NOTHING`, 32557, ``, ``},
-
 		{`UPDATE foo SET (a, a.b) = (1, 2)`, 27792, ``, ``},
 		{`UPDATE foo SET a.b = 1`, 27792, ``, ``},
 		{`UPDATE Foo SET x.y = z`, 27792, ``, ``},
@@ -3040,17 +3131,17 @@ func TestUnimplementedSyntax(t *testing.T) {
 					t.Errorf("%s: expected %q in telemetry keys, got %+v", d.sql, exp, tkeys)
 				}
 
-				exp2 := fmt.Sprintf("issue/%d", d.issue)
+				exp2 := fmt.Sprintf("issue-v/%d", d.issue)
 				found = false
 				hints := errors.GetAllHints(err)
 				for _, h := range hints {
-					if strings.HasSuffix(h, exp2) {
+					if strings.Contains(h, exp2) {
 						found = true
 						break
 					}
 				}
 				if !found {
-					t.Errorf("%s: expected %q at end of hint, got %+v", d.sql, exp2, hints)
+					t.Errorf("%s: expected %q at in hint, got %+v", d.sql, exp2, hints)
 				}
 			}
 		})

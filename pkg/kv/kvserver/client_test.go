@@ -48,7 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -196,7 +196,7 @@ func createTestStoreWithOpts(
 	if !opts.dontBootstrap {
 		var kvs []roachpb.KeyValue
 		var splits []roachpb.RKey
-		kvs, tableSplits := sqlbase.MakeMetadataSchema(
+		kvs, tableSplits := bootstrap.MakeMetadataSchema(
 			keys.SystemSQLCodec, storeCfg.DefaultZoneConfig, storeCfg.DefaultSystemZoneConfig,
 		).GetInitialValues()
 		if !opts.dontCreateSystemRanges {
@@ -545,7 +545,7 @@ func (m *multiTestContext) initGossipNetwork() {
 type multiTestContextKVTransport struct {
 	mtc      *multiTestContext
 	idx      int
-	replicas kvcoord.ReplicaSlice
+	replicas []roachpb.ReplicaDescriptor
 	mu       struct {
 		syncutil.Mutex
 		pending map[roachpb.ReplicaID]struct{}
@@ -553,7 +553,7 @@ type multiTestContextKVTransport struct {
 }
 
 func (m *multiTestContext) kvTransportFactory(
-	_ kvcoord.SendOptions, _ *nodedialer.Dialer, replicas kvcoord.ReplicaSlice,
+	_ kvcoord.SendOptions, _ *nodedialer.Dialer, replicas []roachpb.ReplicaDescriptor,
 ) (kvcoord.Transport, error) {
 	t := &multiTestContextKVTransport{
 		mtc:      m,
@@ -611,7 +611,7 @@ func (t *multiTestContextKVTransport) SendNext(
 	}
 
 	// Clone txn of ba args for sending.
-	ba.Replica = rep.ReplicaDescriptor
+	ba.Replica = rep
 	if txn := ba.Txn; txn != nil {
 		ba.Txn = ba.Txn.Clone()
 	}
@@ -673,7 +673,7 @@ func (t *multiTestContextKVTransport) NextReplica() roachpb.ReplicaDescriptor {
 	if t.IsExhausted() {
 		return roachpb.ReplicaDescriptor{}
 	}
-	return t.replicas[t.idx].ReplicaDescriptor
+	return t.replicas[t.idx]
 }
 
 func (t *multiTestContextKVTransport) SkipReplica() {
@@ -690,7 +690,7 @@ func (t *multiTestContextKVTransport) MoveToFront(replica roachpb.ReplicaDescrip
 		return
 	}
 	for i := range t.replicas {
-		if t.replicas[i].ReplicaDescriptor == replica {
+		if t.replicas[i] == replica {
 			if i < t.idx {
 				t.idx--
 			}
@@ -928,7 +928,7 @@ func (m *multiTestContext) addStore(idx int) {
 	if needBootstrap && idx == 0 {
 		// Bootstrap the initial range on the first engine.
 		var splits []roachpb.RKey
-		kvs, tableSplits := sqlbase.MakeMetadataSchema(
+		kvs, tableSplits := bootstrap.MakeMetadataSchema(
 			keys.SystemSQLCodec, cfg.DefaultZoneConfig, cfg.DefaultSystemZoneConfig,
 		).GetInitialValues()
 		if !m.startWithSingleRange {
@@ -1008,6 +1008,15 @@ func (m *multiTestContext) addStore(idx int) {
 		ch chan struct{}
 	}{
 		ch: make(chan struct{}),
+	}
+	if idx != 0 {
+		// Given multiTestContext does not make use of the join RPC, we have to
+		// manually write out liveness records for each node to maintain the
+		// invariant that all nodes have liveness records present before they
+		// start heartbeating.
+		if err := m.nodeLivenesses[idx].CreateLivenessRecord(ctx, nodeID); err != nil {
+			m.t.Fatal(err)
+		}
 	}
 	m.nodeLivenesses[idx].StartHeartbeat(ctx, stopper, m.engines[idx:idx+1], func(ctx context.Context) {
 		now := clock.Now()
@@ -1556,6 +1565,15 @@ func pushTxnArgs(
 		PusherTxn: *pusher,
 		PusheeTxn: pushee.TxnMeta,
 		PushType:  pushType,
+	}
+}
+
+func adminTransferLeaseArgs(key roachpb.Key, target roachpb.StoreID) roachpb.Request {
+	return &roachpb.AdminTransferLeaseRequest{
+		RequestHeader: roachpb.RequestHeader{
+			Key: key,
+		},
+		Target: target,
 	}
 }
 

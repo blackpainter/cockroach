@@ -44,7 +44,10 @@ func TryDelegate(
 		return d.delegateShowDatabases(t)
 
 	case *tree.ShowEnums:
-		return d.delegateShowEnums(t)
+		return d.delegateShowEnums()
+
+	case *tree.ShowTypes:
+		return d.delegateShowTypes()
 
 	case *tree.ShowCreate:
 		return d.delegateShowCreate(t)
@@ -99,6 +102,9 @@ func TryDelegate(
 
 	case *tree.ShowTables:
 		return d.delegateShowTables(t)
+
+	case *tree.ShowTransactions:
+		return d.delegateShowTransactions(t)
 
 	case *tree.ShowUsers:
 		return d.delegateShowRoles()

@@ -274,9 +274,14 @@ func (f *vectorizedFlow) IsVectorized() bool {
 	return true
 }
 
-// ConcurrentExecution is part of the flowinfra.Flow interface.
-func (f *vectorizedFlow) ConcurrentExecution() bool {
-	return f.operatorConcurrency || f.FlowBase.ConcurrentExecution()
+// ConcurrentTxnUse is part of the flowinfra.Flow interface. It is conservative
+// in that it returns that there is concurrent txn use as soon as any operator
+// concurrency is detected. This should be inconsequential for local flows that
+// use the RootTxn (which are the cases in which we care about this return
+// value), because only unordered synchronizers introduce operator concurrency
+// at the time of writing.
+func (f *vectorizedFlow) ConcurrentTxnUse() bool {
+	return f.operatorConcurrency || f.FlowBase.ConcurrentTxnUse()
 }
 
 // Release releases this vectorizedFlow back to the pool.
@@ -300,7 +305,7 @@ func (f *vectorizedFlow) Cleanup(ctx context.Context) {
 
 	if f.Cfg.TestingKnobs.CheckVectorizedFlowIsClosedCorrectly {
 		if numClosed := atomic.LoadInt32(f.testingInfo.numClosed); numClosed != f.testingInfo.numClosers {
-			colexecerror.InternalError(fmt.Sprintf("expected %d components to be closed, but found that only %d were", f.testingInfo.numClosers, numClosed))
+			colexecerror.InternalError(errors.AssertionFailedf("expected %d components to be closed, but found that only %d were", f.testingInfo.numClosers, numClosed))
 		}
 	}
 
@@ -334,6 +339,7 @@ func (f *vectorizedFlow) Cleanup(ctx context.Context) {
 // must have already been wrapped).
 func (s *vectorizedFlowCreator) wrapWithVectorizedStatsCollector(
 	op colexecbase.Operator,
+	ioReader execinfra.IOReader,
 	inputs []colexecbase.Operator,
 	id int32,
 	idTagKey string,
@@ -357,8 +363,8 @@ func (s *vectorizedFlowCreator) wrapWithVectorizedStatsCollector(
 		inputStatsCollectors[i] = sc
 	}
 	vsc := colexec.NewVectorizedStatsCollector(
-		op, id, idTagKey, len(inputs) == 0, inputWatch, memMonitors, diskMonitors,
-		inputStatsCollectors,
+		op, ioReader, id, idTagKey, inputWatch,
+		memMonitors, diskMonitors, inputStatsCollectors,
 	)
 	s.vectorizedStatsCollectorsQueue = append(s.vectorizedStatsCollectorsQueue, vsc)
 	return vsc, nil
@@ -586,7 +592,15 @@ func (s *vectorizedFlowCreator) setupRemoteOutputStream(
 		// derive a separate child context for each outbox.
 		var outboxCancelFn context.CancelFunc
 		ctx, outboxCancelFn = context.WithCancel(ctx)
-		outbox.Run(ctx, s.nodeDialer, stream.TargetNodeID, s.flowID, stream.StreamID, outboxCancelFn)
+		outbox.Run(
+			ctx,
+			s.nodeDialer,
+			stream.TargetNodeID,
+			s.flowID,
+			stream.StreamID,
+			outboxCancelFn,
+			flowinfra.SettingFlowStreamTimeout.Get(&flowCtx.Cfg.Settings.SV),
+		)
 		currentOutboxes := atomic.AddInt32(&s.numOutboxes, -1)
 		// When the last Outbox on this node exits, we want to make sure that
 		// everything is shutdown; namely, we need to call cancelFn if:
@@ -675,8 +689,8 @@ func (s *vectorizedFlowCreator) setupRouter(
 				// information (e.g. output stall time).
 				var err error
 				localOp, err = s.wrapWithVectorizedStatsCollector(
-					op, nil /* inputs */, int32(stream.StreamID),
-					execinfrapb.StreamIDTagKey, mons,
+					op, nil /* ioReadingOp */, nil, /* inputs */
+					int32(stream.StreamID), execinfrapb.StreamIDTagKey, mons,
 				)
 				if err != nil {
 					return err
@@ -748,7 +762,7 @@ func (s *vectorizedFlowCreator) setupInput(
 			op := colexecbase.Operator(inbox)
 			if s.recordingStats {
 				op, err = s.wrapWithVectorizedStatsCollector(
-					inbox, nil /* inputs */, int32(inputStream.StreamID),
+					inbox, nil /* ioReadingOp */, nil /* inputs */, int32(inputStream.StreamID),
 					execinfrapb.StreamIDTagKey, nil, /* monitors */
 				)
 				if err != nil {
@@ -806,7 +820,8 @@ func (s *vectorizedFlowCreator) setupInput(
 			// this stats collector to display stats.
 			var err error
 			op, err = s.wrapWithVectorizedStatsCollector(
-				op, statsInputsAsOps, -1 /* id */, "" /* idTagKey */, nil, /* monitors */
+				op, nil /* ioReadingOp */, statsInputsAsOps, -1, /* id */
+				"" /* idTagKey */, nil, /* monitors */
 			)
 			if err != nil {
 				return nil, nil, nil, err
@@ -879,8 +894,9 @@ func (s *vectorizedFlowCreator) setupOutput(
 				},
 			)
 		}
-		outbox, err :=
-			s.setupRemoteOutputStream(ctx, flowCtx, op, opOutputTypes, outputStream, metadataSourcesQueue, toClose, factory)
+		outbox, err := s.setupRemoteOutputStream(
+			ctx, flowCtx, op, opOutputTypes, outputStream, metadataSourcesQueue, toClose, factory,
+		)
 		if err != nil {
 			return err
 		}
@@ -1044,7 +1060,8 @@ func (s *vectorizedFlowCreator) setupFlow(
 		op := result.Op
 		if s.recordingStats {
 			op, err = s.wrapWithVectorizedStatsCollector(
-				op, inputs, pspec.ProcessorID, execinfrapb.ProcessorIDTagKey, result.OpMonitors,
+				op, result.IOReader, inputs, pspec.ProcessorID,
+				execinfrapb.ProcessorIDTagKey, result.OpMonitors,
 			)
 			if err != nil {
 				return nil, err
@@ -1106,7 +1123,7 @@ func (s *vectorizedFlowCreator) setupFlow(
 	}
 
 	if len(s.vectorizedStatsCollectorsQueue) > 0 {
-		colexecerror.InternalError("not all vectorized stats collectors have been processed")
+		colexecerror.InternalError(errors.AssertionFailedf("not all vectorized stats collectors have been processed"))
 	}
 	return s.leaves, nil
 }

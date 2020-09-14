@@ -159,6 +159,49 @@ func TestNodeLivenessInitialIncrement(t *testing.T) {
 	verifyEpochIncremented(t, mtc, 0)
 }
 
+// TestNodeLivenessAppearsAtStart tests that liveness records are written right
+// when nodes are added to the cluster (during bootstrap, and when connecting to
+// a bootstrapped node). The test verifies that the liveness records found are
+// what we expect them to be.
+func TestNodeLivenessAppearsAtStart(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{})
+	defer tc.Stopper().Stop(ctx)
+
+	// At this point StartTestCluster has waited for all nodes to become live.
+
+	// Verify liveness records exist for all nodes.
+	for i := 0; i < tc.NumServers(); i++ {
+		nodeID := tc.Server(i).NodeID()
+		nl := tc.Server(i).NodeLiveness().(*kvserver.NodeLiveness)
+
+		if live, err := nl.IsLive(nodeID); err != nil {
+			t.Fatal(err)
+		} else if !live {
+			t.Fatalf("node %d not live", nodeID)
+		}
+
+		livenessRec, err := nl.GetLiveness(nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if livenessRec.NodeID != nodeID {
+			t.Fatalf("expected node ID %d, got %d", nodeID, livenessRec.NodeID)
+		}
+		// We expect epoch=1 as nodes first create a liveness record at epoch=0,
+		// and then increment it during their first heartbeat.
+		if livenessRec.Epoch != 1 {
+			t.Fatalf("expected epoch=1, got epoch=%d", livenessRec.Epoch)
+		}
+		if !livenessRec.Membership.Active() {
+			t.Fatalf("expected membership=active, got membership=%s", livenessRec.Membership)
+		}
+	}
+}
+
 func verifyEpochIncremented(t *testing.T, mtc *multiTestContext, nodeIdx int) {
 	testutils.SucceedsSoon(t, func() error {
 		liveness, err := mtc.nodeLivenesses[nodeIdx].GetLiveness(mtc.gossips[nodeIdx].NodeID.Get())
@@ -262,10 +305,10 @@ func TestNodeIsLiveCallback(t *testing.T) {
 
 	var cbMu syncutil.Mutex
 	cbs := map[roachpb.NodeID]struct{}{}
-	mtc.nodeLivenesses[0].RegisterCallback(func(nodeID roachpb.NodeID) {
+	mtc.nodeLivenesses[0].RegisterCallback(func(l kvserverpb.Liveness) {
 		cbMu.Lock()
 		defer cbMu.Unlock()
-		cbs[nodeID] = struct{}{}
+		cbs[l.NodeID] = struct{}{}
 	})
 
 	// Advance clock past the liveness threshold.
@@ -555,10 +598,13 @@ func TestNodeLivenessGetIsLiveMap(t *testing.T) {
 	verifyLiveness(t, mtc)
 	pauseNodeLivenessHeartbeatLoops(mtc)
 	lMap := mtc.nodeLivenesses[0].GetIsLiveMap()
+	l1, _ := mtc.nodeLivenesses[0].GetLiveness(1)
+	l2, _ := mtc.nodeLivenesses[0].GetLiveness(2)
+	l3, _ := mtc.nodeLivenesses[0].GetLiveness(3)
 	expectedLMap := kvserver.IsLiveMap{
-		1: {IsLive: true, Epoch: 1},
-		2: {IsLive: true, Epoch: 1},
-		3: {IsLive: true, Epoch: 1},
+		1: {Liveness: l1.Liveness, IsLive: true},
+		2: {Liveness: l2.Liveness, IsLive: true},
+		3: {Liveness: l3.Liveness, IsLive: true},
 	}
 	if !reflect.DeepEqual(expectedLMap, lMap) {
 		t.Errorf("expected liveness map %+v; got %+v", expectedLMap, lMap)
@@ -580,10 +626,13 @@ func TestNodeLivenessGetIsLiveMap(t *testing.T) {
 
 	// Now verify only node 0 is live.
 	lMap = mtc.nodeLivenesses[0].GetIsLiveMap()
+	l1, _ = mtc.nodeLivenesses[0].GetLiveness(1)
+	l2, _ = mtc.nodeLivenesses[0].GetLiveness(2)
+	l3, _ = mtc.nodeLivenesses[0].GetLiveness(3)
 	expectedLMap = kvserver.IsLiveMap{
-		1: {IsLive: true, Epoch: 1},
-		2: {IsLive: false, Epoch: 1},
-		3: {IsLive: false, Epoch: 1},
+		1: {Liveness: l1.Liveness, IsLive: true},
+		2: {Liveness: l2.Liveness, IsLive: false},
+		3: {Liveness: l3.Liveness, IsLive: false},
 	}
 	if !reflect.DeepEqual(expectedLMap, lMap) {
 		t.Errorf("expected liveness map %+v; got %+v", expectedLMap, lMap)
@@ -923,9 +972,9 @@ func TestNodeLivenessStatusMap(t *testing.T) {
 	config.TestingSetZoneConfig(keys.MetaRangesID, zoneConfig)
 
 	log.Infof(ctx, "starting 3 more nodes")
-	tc.AddServer(t, serverArgs)
-	tc.AddServer(t, serverArgs)
-	tc.AddServer(t, serverArgs)
+	tc.AddAndStartServer(t, serverArgs)
+	tc.AddAndStartServer(t, serverArgs)
+	tc.AddAndStartServer(t, serverArgs)
 
 	log.Infof(ctx, "waiting for node statuses")
 	tc.WaitForNodeStatuses(t)

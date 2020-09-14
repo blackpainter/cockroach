@@ -447,44 +447,6 @@ var varGen = map[string]sessionVar{
 	},
 
 	// CockroachDB extension.
-	`experimental_enable_enums`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`experimental_enable_enums`),
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			b, err := parseBoolVar(`experimental_enable_enums`, s)
-			if err != nil {
-				return err
-			}
-			m.SetEnumsEnabled(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData.EnumsEnabled)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(enumsEnabledClusterMode.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
-	`experimental_enable_user_defined_schemas`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`experimental_enable_user_defined_schemas`),
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			b, err := parseBoolVar(`experimental_enable_user_defined_schemas`, s)
-			if err != nil {
-				return err
-			}
-			m.SetUserDefinedSchemasEnabled(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData.UserDefinedSchemasEnabled)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(userDefinedSchemasClusterMode.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
 	`enable_zigzag_join`: {
 		GetStringVal: makePostgresBoolGetStringValFn(`enable_zigzag_join`),
 		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
@@ -667,26 +629,6 @@ var varGen = map[string]sessionVar{
 	},
 
 	// CockroachDB extension.
-	// TODO(mgartner): remove this once partial indexes are fully supported.
-	`experimental_partial_indexes`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`experimental_partial_indexes`),
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			b, err := parseBoolVar("experimental_partial_indexes", s)
-			if err != nil {
-				return err
-			}
-			m.SetPartialIndexes(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData.PartialIndexes)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(partialIndexClusterMode.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
 	`enable_implicit_select_for_update`: {
 		GetStringVal: makePostgresBoolGetStringValFn(`enable_implicit_select_for_update`),
 		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
@@ -721,25 +663,6 @@ var varGen = map[string]sessionVar{
 		},
 		GlobalDefault: func(sv *settings.Values) string {
 			return formatBoolAsPostgresSetting(insertFastPathClusterMode.Get(sv))
-		},
-	},
-
-	// CockroachDB extension.
-	`enable_interleaved_joins`: {
-		GetStringVal: makePostgresBoolGetStringValFn(`enable_interleaved_joins`),
-		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
-			b, err := parseBoolVar("enable_interleaved_joins", s)
-			if err != nil {
-				return err
-			}
-			m.SetInterleavedJoins(b)
-			return nil
-		},
-		Get: func(evalCtx *extendedEvalContext) string {
-			return formatBoolAsPostgresSetting(evalCtx.SessionData.InterleavedJoins)
-		},
-		GlobalDefault: func(sv *settings.Values) string {
-			return formatBoolAsPostgresSetting(planInterleavedJoins.Get(sv))
 		},
 	},
 
@@ -826,10 +749,6 @@ var varGen = map[string]sessionVar{
 	// See https://www.postgresql.org/docs/10/static/runtime-config-client.html#GUC-LOC-TIMEOUT
 	`lock_timeout`: makeCompatIntVar(`lock_timeout`, 0),
 
-	// See https://www.postgresql.org/docs/10/static/runtime-config-client.html#GUC-IDLE-IN-TRANSACTION-SESSION-TIMEOUT
-	// See also issue #5924.
-	`idle_in_transaction_session_timeout`: makeCompatIntVar(`idle_in_transaction_session_timeout`, 0),
-
 	// Supported for PG compatibility only.
 	// See https://www.postgresql.org/docs/10/static/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
 	`max_identifier_length`: {
@@ -871,6 +790,25 @@ var varGen = map[string]sessionVar{
 			return nil
 		},
 		GlobalDefault: globalFalse,
+	},
+
+	// CockroachDB extension.
+	`prefer_lookup_joins_for_fks`: {
+		Get: func(evalCtx *extendedEvalContext) string {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData.PreferLookupJoinsForFKs)
+		},
+		GetStringVal: makePostgresBoolGetStringValFn("prefer_lookup_joins_for_fks"),
+		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
+			b, err := parseBoolVar("prefer_lookup_joins_for_fks", s)
+			if err != nil {
+				return err
+			}
+			m.SetPreferLookupJoinsForFKs(b)
+			return nil
+		},
+		GlobalDefault: func(sv *settings.Values) string {
+			return formatBoolAsPostgresSetting(preferLookupJoinsForFKs.Get(sv))
+		},
 	},
 
 	// See https://www.postgresql.org/docs/10/static/ddl-schemas.html#DDL-SCHEMAS-PATH
@@ -1000,6 +938,16 @@ var varGen = map[string]sessionVar{
 		GlobalDefault: func(sv *settings.Values) string {
 			return clusterIdleInSessionTimeout.String(sv)
 		},
+	},
+
+	`idle_in_transaction_session_timeout`: {
+		GetStringVal: makeTimeoutVarGetter(`idle_in_transaction_session_timeout`),
+		Set:          idleInTransactionSessionTimeoutVarSet,
+		Get: func(evalCtx *extendedEvalContext) string {
+			ms := evalCtx.SessionData.StmtTimeout.Nanoseconds() / int64(time.Millisecond)
+			return strconv.FormatInt(ms, 10)
+		},
+		GlobalDefault: func(sv *settings.Values) string { return "0" },
 	},
 
 	// See https://www.postgresql.org/docs/10/static/runtime-config-client.html#GUC-TIMEZONE
@@ -1143,6 +1091,24 @@ var varGen = map[string]sessionVar{
 		},
 		GlobalDefault: func(sv *settings.Values) string {
 			return formatBoolAsPostgresSetting(hashShardedIndexesEnabledClusterMode.Get(sv))
+		},
+	},
+
+	`disallow_full_table_scans`: {
+		GetStringVal: makePostgresBoolGetStringValFn(`disallow_full_table_scan`),
+		Set: func(_ context.Context, m *sessionDataMutator, s string) error {
+			b, err := parseBoolVar(`disallow_full_table_scans`, s)
+			if err != nil {
+				return err
+			}
+			m.SetDisallowFullTableScans(b)
+			return nil
+		},
+		Get: func(evalCtx *extendedEvalContext) string {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData.DisallowFullTableScans)
+		},
+		GlobalDefault: func(sv *settings.Values) string {
+			return formatBoolAsPostgresSetting(disallowFullTableScans.Get(sv))
 		},
 	},
 

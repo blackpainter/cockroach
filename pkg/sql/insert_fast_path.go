@@ -15,14 +15,16 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -53,7 +55,7 @@ type insertFastPathNode struct {
 	// columns is set if this INSERT is returning any rows, to be
 	// consumed by a renderNode upstream. This occurs when there is a
 	// RETURNING clause with some scalar expressions.
-	columns sqlbase.ResultColumns
+	columns colinfo.ResultColumns
 
 	run insertFastPathRun
 }
@@ -93,7 +95,7 @@ type insertFastPathFKSpanInfo struct {
 type insertFastPathFKCheck struct {
 	exec.InsertFastPathFKCheck
 
-	tabDesc     *sqlbase.ImmutableTableDescriptor
+	tabDesc     *tabledesc.Immutable
 	idxDesc     *descpb.IndexDescriptor
 	keyPrefix   []byte
 	colMap      map[descpb.ColumnID]int
@@ -106,7 +108,7 @@ func (c *insertFastPathFKCheck) init(params runParams) error {
 	c.idxDesc = idx.desc
 
 	codec := params.ExecCfg().Codec
-	c.keyPrefix = sqlbase.MakeIndexKeyPrefix(codec, c.tabDesc, c.idxDesc.ID)
+	c.keyPrefix = rowenc.MakeIndexKeyPrefix(codec, c.tabDesc, c.idxDesc.ID)
 	c.spanBuilder = span.MakeBuilder(codec, c.tabDesc, c.idxDesc)
 
 	if len(c.InsertCols) > idx.numLaxKeyCols {
@@ -232,7 +234,7 @@ func (n *insertFastPathNode) startExec(params runParams) error {
 	// Cache traceKV during execution, to avoid re-evaluating it for every row.
 	n.run.traceKV = params.p.ExtendedEvalContext().Tracing.KVTracingEnabled()
 
-	n.run.initRowContainer(params, n.columns, 0 /* rowCapacity */)
+	n.run.initRowContainer(params, n.columns)
 
 	n.run.numInputCols = len(n.input[0])
 	n.run.inputBuf = make(tree.Datums, len(n.input)*n.run.numInputCols)
@@ -319,7 +321,7 @@ func (n *insertFastPathNode) BatchedNext(params runParams) (bool, error) {
 	n.run.done = true
 
 	// Possibly initiate a run of CREATE STATISTICS.
-	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc.ID, len(n.input))
+	params.ExecCfg().StatsRefresher.NotifyMutation(n.run.ti.ri.Helper.TableDesc.GetID(), len(n.input))
 
 	return true, nil
 }

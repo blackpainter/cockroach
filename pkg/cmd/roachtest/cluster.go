@@ -59,8 +59,10 @@ var (
 	cloud                         = gce
 	encrypt          encryptValue = "false"
 	instanceType     string
+	localSSD         bool
 	workload         string
 	roachprod        string
+	createArgs       []string
 	buildTag         string
 	clusterName      string
 	clusterWipe      bool
@@ -381,7 +383,7 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
 	debugStdoutBuffer, _ := circbuf.NewBuffer(4096)
-	debugStderrBuffer, _ := circbuf.NewBuffer(1024)
+	debugStderrBuffer, _ := circbuf.NewBuffer(4096)
 
 	// Do a dance around https://github.com/golang/go/issues/23019.
 	// When the command we run launches a subprocess, that subprocess receives
@@ -476,6 +478,15 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 	closePipes(ctx)
 	wg.Wait()
 
+	stdoutString := debugStdoutBuffer.String()
+	if debugStdoutBuffer.TotalWritten() > debugStdoutBuffer.Size() {
+		stdoutString = "<... some data truncated by circular buffer; go to artifacts for details ...>\n" + stdoutString
+	}
+	stderrString := debugStderrBuffer.String()
+	if debugStderrBuffer.TotalWritten() > debugStderrBuffer.Size() {
+		stderrString = "<... some data truncated by circular buffer; go to artifacts for details ...>\n" + stderrString
+	}
+
 	if err != nil {
 		// Context errors opaquely appear as "signal killed" when manifested.
 		// We surface this error explicitly.
@@ -487,16 +498,16 @@ func execCmdEx(ctx context.Context, l *logger, args ...string) cmdRes {
 			err = &withCommandDetails{
 				cause:  err,
 				cmd:    strings.Join(args, " "),
-				stderr: debugStderrBuffer.String(),
-				stdout: debugStdoutBuffer.String(),
+				stderr: stderrString,
+				stdout: stdoutString,
 			}
 		}
 	}
 
 	return cmdRes{
 		err:    err,
-		stdout: debugStdoutBuffer.String(),
-		stderr: debugStderrBuffer.String(),
+		stdout: stdoutString,
+		stderr: stderrString,
 	}
 }
 
@@ -546,6 +557,20 @@ func execCmdWithBuffer(ctx context.Context, l *logger, args ...string) ([]byte, 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, errors.Wrapf(err, `%s`, strings.Join(args, ` `))
+	}
+	return out, nil
+}
+
+// execCmdWithStdout executes the given command and returns its stdout
+// output. If the return code is not 0, an error is also returned.
+// l is used to log the command before running it. No output is logged.
+func execCmdWithStdout(ctx context.Context, l *logger, args ...string) ([]byte, error) {
+	l.Printf("> %s\n", strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+
+	out, err := cmd.Output()
 	if err != nil {
 		return out, errors.Wrapf(err, `%s`, strings.Join(args, ` `))
 	}
@@ -707,6 +732,10 @@ func machineTypeFlag(machineType string) string {
 func isSSD(machineType string) bool {
 	if cloud != aws {
 		panic("can only differentiate SSDs based on machine type on AWS")
+	}
+	if !localSSD {
+		// Overridden by the user using a cmd arg.
+		return false
 	}
 
 	typeAndSize := strings.Split(machineType, ".")
@@ -926,6 +955,9 @@ func (s *clusterSpec) args() []string {
 	}
 	if s.Lifetime != 0 {
 		args = append(args, "--lifetime="+s.Lifetime.String())
+	}
+	if len(createArgs) > 0 {
+		args = append(args, createArgs...)
 	}
 	return args
 }
@@ -1228,7 +1260,7 @@ func (f *clusterFactory) newCluster(
 
 	sargs := []string{roachprod, "create", c.name, "-n", fmt.Sprint(c.spec.NodeCount)}
 	sargs = append(sargs, cfg.spec.args()...)
-	if !cfg.useIOBarrier {
+	if !cfg.useIOBarrier && localSSD {
 		sargs = append(sargs, "--local-ssd-no-ext4-barrier")
 	}
 
@@ -1479,12 +1511,60 @@ func (c *cluster) FetchLogs(ctx context.Context) error {
 
 	// Don't hang forever if we can't fetch the logs.
 	return contextutil.RunWithTimeout(ctx, "fetch logs", 2*time.Minute, func(ctx context.Context) error {
-		path := filepath.Join(c.t.ArtifactsDir(), "logs")
+		path := filepath.Join(c.t.ArtifactsDir(), "logs", "unredacted")
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
 
-		return execCmd(ctx, c.l, roachprod, "get", c.name, "logs" /* src */, path /* dest */)
+		if err := execCmd(ctx, c.l, roachprod, "get", c.name, "logs" /* src */, path /* dest */); err != nil {
+			log.Infof(ctx, "failed to fetch logs: %v", err)
+			if ctx.Err() != nil {
+				return err
+			}
+		}
+
+		if err := c.RunE(ctx, c.All(), "mkdir -p logs/redacted && ./cockroach debug merge-logs --redact logs/*.log > logs/redacted/combined.log"); err != nil {
+			log.Infof(ctx, "failed to redact logs: %v", err)
+			if ctx.Err() != nil {
+				return err
+			}
+		}
+
+		return execCmd(
+			ctx, c.l, roachprod, "get", c.name, "logs/redacted/combined.log" /* src */, filepath.Join(c.t.ArtifactsDir(), "logs/cockroach.log"),
+		)
+	})
+}
+
+// FetchDiskUsage collects a summary of the disk usage on nodes.
+func (c *cluster) FetchDiskUsage(ctx context.Context) error {
+	// TODO(jackson): This is temporary for debugging out-of-disk-space
+	// failures like #44845.
+	if c.spec.NodeCount == 0 || c.isLocal() {
+		// No nodes can happen during unit tests and implies nothing to do.
+		// Also, don't grab disk usage on local runs.
+		return nil
+	}
+
+	c.l.Printf("fetching disk usage\n")
+	c.status("fetching disk usage")
+
+	// Don't hang forever.
+	return contextutil.RunWithTimeout(ctx, "disk usage", 20*time.Second, func(ctx context.Context) error {
+		const name = "diskusage.txt"
+		path := filepath.Join(c.t.ArtifactsDir(), name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
+		if err := execCmd(
+			ctx, c.l, roachprod, "ssh", c.name, "--",
+			"/bin/bash", "-c", "'du -c /mnt/data1 > "+name+"'",
+		); err != nil {
+			// Don't error out because it might've worked on some nodes. Fetching will
+			// error out below but will get everything it can first.
+			c.l.Printf("during disk usage fetching: %s", err)
+		}
+		return execCmd(ctx, c.l, roachprod, "get", c.name, name /* src */, path /* dest */)
 	})
 }
 
@@ -2044,10 +2124,18 @@ func (c *cluster) StartE(ctx context.Context, opts ...option) error {
 	}
 	args = append(args, roachprodArgs(opts)...)
 	args = append(args, c.makeNodes(opts...))
+	// Enable Jemalloc profiles for all roachtests. This has only
+	// minimal performance impact and significantly improves the
+	// troubleshootability of memory-related issues.
+	args = append(args, enableJemallocArgs()...)
 	if !argExists(args, "--encrypt") && c.encryptDefault {
 		args = append(args, "--encrypt")
 	}
 	return execCmd(ctx, c.l, args...)
+}
+
+func enableJemallocArgs() []string {
+	return []string{"-e", "MALLOC_CONF=prof:true"}
 }
 
 // Start is like StartE() except it takes a test and, on error, calls t.Fatal().
@@ -2223,6 +2311,18 @@ func (c *cluster) RunWithBuffer(
 		return nil, err
 	}
 	return execCmdWithBuffer(ctx, l,
+		append([]string{roachprod, "run", c.makeNodes(node), "--"}, args...)...)
+}
+
+// RunWithStdout runs a command on the specified node, returning the resulting
+// stdout.
+func (c *cluster) RunWithStdout(
+	ctx context.Context, l *logger, node nodeListOption, args ...string,
+) ([]byte, error) {
+	if err := errors.Wrap(ctx.Err(), "cluster.RunWithStdout"); err != nil {
+		return nil, err
+	}
+	return execCmdWithStdout(ctx, l,
 		append([]string{roachprod, "run", c.makeNodes(node), "--"}, args...)...)
 }
 

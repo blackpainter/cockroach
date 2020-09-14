@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
@@ -22,8 +23,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
@@ -95,6 +96,7 @@ func (b *Builder) buildInsert(ins *memo.InsertExpr) (execPlan, error) {
 	node, err := b.factory.ConstructInsert(
 		input.root,
 		tab,
+		ins.Arbiters,
 		insertOrds,
 		returnOrds,
 		checkOrds,
@@ -119,16 +121,14 @@ func (b *Builder) buildInsert(ins *memo.InsertExpr) (execPlan, error) {
 // tryBuildFastPathInsert attempts to construct an insert using the fast path,
 // checking all required conditions. See exec.Factory.ConstructInsertFastPath.
 func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok bool, _ error) {
-	if !b.allowInsertFastPath {
-		return execPlan{}, false, nil
-	}
-
 	// Conditions from ConstructFastPathInsert:
 	//
 	//  - there are no other mutations in the statement, and the output of the
 	//    insert is not processed through side-effecting expressions (i.e. we can
 	//    auto-commit);
-	if !b.allowAutoCommit {
+	//
+	// This condition was taken into account in build().
+	if !b.allowInsertFastPath {
 		return execPlan{}, false, nil
 	}
 
@@ -250,6 +250,7 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		returnOrds,
 		checkOrds,
 		fkChecks,
+		b.allowAutoCommit,
 	)
 	if err != nil {
 		return execPlan{}, false, err
@@ -304,11 +305,11 @@ func (b *Builder) buildUpdate(upd *memo.UpdateExpr) (execPlan, error) {
 	checkOrds := ordinalSetFromColList(upd.CheckCols)
 
 	// Construct the result columns for the passthrough set.
-	var passthroughCols sqlbase.ResultColumns
+	var passthroughCols colinfo.ResultColumns
 	if upd.NeedResults() {
 		for _, passthroughCol := range upd.PassthroughCols {
 			colMeta := b.mem.Metadata().ColumnMeta(passthroughCol)
-			passthroughCols = append(passthroughCols, sqlbase.ResultColumn{Name: colMeta.Alias, Typ: colMeta.Type})
+			passthroughCols = append(passthroughCols, colinfo.ResultColumn{Name: colMeta.Alias, Typ: colMeta.Type})
 		}
 	}
 
@@ -394,6 +395,7 @@ func (b *Builder) buildUpsert(ups *memo.UpsertExpr) (execPlan, error) {
 	node, err := b.factory.ConstructUpsert(
 		input.root,
 		tab,
+		ups.Arbiters,
 		canaryCol,
 		insertColOrds,
 		fetchColOrds,
@@ -594,10 +596,10 @@ func (b *Builder) tryBuildDeleteRangeOnInterleaving(
 				return execPlan{}, false, nil
 			}
 			for i := 0; i < numCols; i++ {
-				if fk.OriginColumnOrdinal(child, i) != childIdx.Column(i).Ordinal {
+				if fk.OriginColumnOrdinal(child, i) != childIdx.Column(i).Ordinal() {
 					return execPlan{}, false, nil
 				}
-				if fk.ReferencedColumnOrdinal(parent, i) != parentIdx.Column(i).Ordinal {
+				if fk.ReferencedColumnOrdinal(parent, i) != parentIdx.Column(i).Ordinal() {
 					return execPlan{}, false, nil
 				}
 			}
@@ -639,27 +641,41 @@ func (b *Builder) buildDeleteRange(
 	scan := del.Input.(*memo.ScanExpr)
 	tab := b.mem.Metadata().Table(scan.Table)
 	needed, _ := b.getColumns(scan.Cols, scan.Table)
-	maxKeys := 0
-	if len(interleavedTables) == 0 {
-		// Calculate the maximum number of keys that the scan could return by
-		// multiplying the number of possible result rows by the number of column
-		// families of the table. The factory uses this information to determine
-		// whether to allow autocommit.
-		// We don't do this if there are interleaved children, as we don't know how
-		// many children rows may be in range.
-		maxKeys = int(b.indexConstraintMaxResults(scan)) * tab.FamilyCount()
+
+	autoCommit := false
+	if b.allowAutoCommit {
+		// Permitting autocommit in DeleteRange is very important, because DeleteRange
+		// is used for simple deletes from primary indexes like
+		// DELETE FROM t WHERE key = 1000
+		// When possible, we need to make this a 1pc transaction for performance
+		// reasons. At the same time, we have to be careful, because DeleteRange
+		// returns all of the keys that it deleted - so we have to set a limit on the
+		// DeleteRange request. But, trying to set autocommit and a limit on the
+		// request doesn't work properly if the limit is hit. So, we permit autocommit
+		// here if we can guarantee that the number of returned keys is finite and
+		// relatively small.
+
+		// We can't calculate the maximum number of keys if there are interleaved
+		// children, as we don't know how many children rows may be in range.
+		if len(interleavedTables) == 0 {
+			if maxRows, ok := b.indexConstraintMaxResults(scan); ok {
+				if maxKeys := maxRows * uint64(tab.FamilyCount()); maxKeys <= row.TableTruncateChunkSize {
+					// Other mutations only allow auto-commit if there are no FK checks or
+					// cascades. In this case, we won't actually execute anything for the
+					// checks or cascades - if we got this far, we determined that the FKs
+					// match the interleaving hierarchy and a delete range is sufficient.
+					autoCommit = true
+				}
+			}
+		}
 	}
-	// Other mutations only allow auto-commit if there are no FK checks or
-	// cascades. In this case, we won't actually execute anything for the checks
-	// or cascades - if we got this far, we determined that the FKs match the
-	// interleaving hierarchy and a delete range is sufficient.
+
 	root, err := b.factory.ConstructDeleteRange(
 		tab,
 		needed,
 		scan.Constraint,
 		interleavedTables,
-		maxKeys,
-		b.allowAutoCommit,
+		autoCommit,
 	)
 	if err != nil {
 		return execPlan{}, err
@@ -708,7 +724,7 @@ func mutationOutputColMap(mutation memo.RelExpr) opt.ColMap {
 	for i, n := 0, tab.ColumnCount(); i < n; i++ {
 		colID := private.Table.ColumnID(i)
 		// System columns should not be included in mutations.
-		if outCols.Contains(colID) && !cat.IsSystemColumn(tab, i) {
+		if outCols.Contains(colID) && tab.Column(i).Kind() != cat.System {
 			colMap.Set(int(colID), ord)
 			ord++
 		}
@@ -982,7 +998,36 @@ func (b *Builder) shouldApplyImplicitLockingToUpdateInput(upd *memo.UpdateExpr) 
 // TODO(nvanbenschoten): implement this method to match on appropriate Upsert
 // expression trees and apply a row-level locking mode.
 func (b *Builder) shouldApplyImplicitLockingToUpsertInput(ups *memo.UpsertExpr) bool {
-	return false
+	if !b.evalCtx.SessionData.ImplicitSelectForUpdate {
+		return false
+	}
+
+	// Try to match the Upsert's input expression against the pattern:
+	//
+	//   [Project] (LeftJoin Scan | LookupJoin) [Project] Values
+	//
+	input := ups.Input
+	if proj, ok := input.(*memo.ProjectExpr); ok {
+		input = proj.Input
+	}
+	switch join := input.(type) {
+	case *memo.LeftJoinExpr:
+		if _, ok := join.Right.(*memo.ScanExpr); !ok {
+			return false
+		}
+		input = join.Left
+
+	case *memo.LookupJoinExpr:
+		input = join.Input
+
+	default:
+		return false
+	}
+	if proj, ok := input.(*memo.ProjectExpr); ok {
+		input = proj.Input
+	}
+	_, ok := input.(*memo.ValuesExpr)
+	return ok
 }
 
 // tryApplyImplicitLockingToDeleteInput determines whether or not the builder

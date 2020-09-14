@@ -15,11 +15,11 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -43,7 +43,7 @@ func (p *planner) DropRole(ctx context.Context, n *tree.DropRole) (planNode, err
 func (p *planner) DropRoleNode(
 	ctx context.Context, namesE tree.Exprs, ifExists bool, isRole bool, opName string,
 ) (*DropRoleNode, error) {
-	if err := p.HasRoleOption(ctx, roleoption.CREATEROLE); err != nil {
+	if err := p.CheckRoleOption(ctx, roleoption.CREATEROLE); err != nil {
 		return nil, err
 	}
 
@@ -95,12 +95,29 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		userNames[normalizedUsername] = make([]objectAndType, 0)
 	}
 
+	// Non-admin users cannot drop admins.
+	hasAdmin, err := params.p.HasAdminRole(params.ctx)
+	if err != nil {
+		return err
+	}
+	if !hasAdmin {
+		for i := range names {
+			targetIsAdmin, err := params.p.UserHasAdminRole(params.ctx, names[i])
+			if err != nil {
+				return err
+			}
+			if targetIsAdmin {
+				return pgerror.New(pgcode.InsufficientPrivilege, "must be superuser to drop superusers")
+			}
+		}
+	}
+
 	f := tree.NewFmtCtx(tree.FmtSimple)
 	defer f.Close()
 
 	// First check all the databases.
 	if err := forEachDatabaseDesc(params.ctx, params.p, nil /*nil prefix = all databases*/, true, /* requiresPrivileges */
-		func(db *sqlbase.ImmutableDatabaseDescriptor) error {
+		func(db *dbdesc.Immutable) error {
 			if _, ok := userNames[db.GetPrivileges().Owner]; ok {
 				userNames[db.GetPrivileges().Owner] = append(
 					userNames[db.GetPrivileges().Owner],
@@ -134,13 +151,13 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		return err
 	}
 
-	lCtx := newInternalLookupCtx(descs, nil /*prefix - we want all descriptors */)
+	lCtx := newInternalLookupCtx(params.ctx, descs, nil /*prefix - we want all descriptors */)
 	// TODO(richardjcai): Also need to add privilege checking for types and
 	// user defined schemas when they are added.
 	// privileges are added.
 	for _, tbID := range lCtx.tbIDs {
 		table := lCtx.tbDescs[tbID]
-		if !tableIsVisible(table, true /*allowAdding*/) {
+		if !descriptorIsVisible(table, true /*allowAdding*/) {
 			continue
 		}
 		if _, ok := userNames[table.GetPrivileges().Owner]; ok {
@@ -208,6 +225,24 @@ func (n *DropRoleNode) startExec(params runParams) error {
 		if normalizedUsername == security.RootUser {
 			return pgerror.Newf(
 				pgcode.InvalidParameterValue, "cannot drop special user %s", normalizedUsername)
+		}
+
+		// Check if user owns any scheduled jobs.
+		numSchedulesRow, err := params.ExecCfg().InternalExecutor.QueryRow(
+			params.ctx,
+			"check-user-schedules",
+			params.p.txn,
+			"SELECT count(*) FROM system.scheduled_jobs WHERE owner=$1",
+			normalizedUsername,
+		)
+		if err != nil {
+			return err
+		}
+		numSchedules := int64(tree.MustBeDInt(numSchedulesRow[0]))
+		if numSchedules > 0 {
+			return pgerror.Newf(pgcode.DependentObjectsStillExist,
+				"cannot drop role/user %s; it owns %d scheduled jobs.",
+				normalizedUsername, numSchedules)
 		}
 
 		numUsersDeleted, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(

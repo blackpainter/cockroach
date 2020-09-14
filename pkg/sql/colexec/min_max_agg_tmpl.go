@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // Remove unused warning.
@@ -40,13 +41,13 @@ var _ = colexecerror.InternalError
 // if the second input compares successfully to the third input. The comparison
 // operator is tree.LT for MIN and is tree.GT for MAX.
 func _ASSIGN_CMP(_, _, _, _, _, _ string) bool {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // _COPYVAL_MAYBE_CAST is the template function for copying the second argument
 // into the first one, possibly performing a cast in the process.
 func _COPYVAL_MAYBE_CAST(_, _ string) bool {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // */}}
@@ -167,27 +168,35 @@ func (a *_AGG_TYPE_AGGKINDAgg) Compute(
 	a.allocator.PerformOperation(
 		[]coldata.Vec{a.vec},
 		func() {
-			if nulls.MaybeHasNulls() {
-				if sel != nil {
-					sel = sel[:inputLen]
-					for _, i := range sel {
-						_ACCUMULATE_MINMAX(a, nulls, i, true)
-					}
-				} else {
-					col = execgen.SLICE(col, 0, inputLen)
+			// {{if eq "_AGGKIND" "Ordered"}}
+			groups := a.groups
+			// {{/*
+			// We don't need to check whether sel is non-nil when performing
+			// hash aggregation because the hash aggregator always uses non-nil
+			// sel to specify the tuples to be aggregated.
+			// */}}
+			if sel == nil {
+				_ = groups[inputLen-1]
+				col = execgen.SLICE(col, 0, inputLen)
+				if nulls.MaybeHasNulls() {
 					for i := 0; i < inputLen; i++ {
 						_ACCUMULATE_MINMAX(a, nulls, i, true)
 					}
-				}
-			} else {
-				if sel != nil {
-					sel = sel[:inputLen]
-					for _, i := range sel {
+				} else {
+					for i := 0; i < inputLen; i++ {
 						_ACCUMULATE_MINMAX(a, nulls, i, false)
 					}
+				}
+			} else
+			// {{end}}
+			{
+				sel = sel[:inputLen]
+				if nulls.MaybeHasNulls() {
+					for _, i := range sel {
+						_ACCUMULATE_MINMAX(a, nulls, i, true)
+					}
 				} else {
-					col = execgen.SLICE(col, 0, inputLen)
-					for i := 0; i < inputLen; i++ {
+					for _, i := range sel {
 						_ACCUMULATE_MINMAX(a, nulls, i, false)
 					}
 				}
@@ -245,7 +254,7 @@ func _ACCUMULATE_MINMAX(a *_AGG_TYPE_AGGKINDAgg, nulls *coldata.Nulls, i int, _H
 	// {{define "accumulateMinMax"}}
 
 	// {{if eq "_AGGKIND" "Ordered"}}
-	if a.groups[i] {
+	if groups[i] {
 		// If we encounter a new group, and we haven't found any non-nulls for the
 		// current group, the output for this group should be null.
 		if !a.foundNonNullForCurrentGroup {

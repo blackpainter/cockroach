@@ -17,6 +17,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1652,6 +1653,86 @@ func TestRangeInfo(t *testing.T) {
 	}
 }
 
+// Test that, if a client makes a request to a range that has recently split and
+// the client indicates that it has pre-split info, the serve replies with
+// updated info on both sides of the split. The server has a heuristic for
+// figuring out what info to return to the client.
+func TestRangeInfoAfterSplit(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	store, err := s.GetStores().(*kvserver.Stores).GetStore(s.GetFirstStoreID())
+	require.NoError(t, err)
+
+	key, err := s.ScratchRange()
+	require.NoError(t, err)
+	rkey := keys.MustAddr(key)
+	r := store.LookupReplica(rkey)
+	require.NotNil(t, r)
+	preSplitDesc := r.Desc()
+
+	lDesc, rDesc, err := s.SplitRange(key.Next())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		key     roachpb.RKey
+		rangeID roachpb.RangeID
+	}{
+		{
+			name:    "query left",
+			key:     lDesc.StartKey,
+			rangeID: lDesc.RangeID,
+		},
+		{
+			name: "query right",
+			key:  rDesc.StartKey,
+			// This test is not realistic since, if the client has the pre-split
+			// descriptor, it wouldn't know to put the correct RangeID when trying to
+			// address the RHS. As such, it would send the request with the pre-split
+			// range ID, which corresponds to the LHS' id (after the split), and, at
+			// least as of this writing, it would receive a RangeKeyMismatchError. We
+			// test the situation where the request is routed correctly to the RHS
+			// anyway.
+			rangeID: rDesc.RangeID,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ba := roachpb.BatchRequest{
+				Header: roachpb.Header{
+					RangeID: tc.rangeID,
+					ClientRangeInfo: &roachpb.ClientRangeInfo{
+						DescriptorGeneration: preSplitDesc.Generation,
+					},
+				},
+			}
+			gArgs := &roachpb.GetRequest{
+				RequestHeader: roachpb.RequestHeader{
+					Key: tc.key.AsRawKey(),
+				},
+			}
+			ba.Add(gArgs)
+			br, pErr := store.Send(ctx, ba)
+			require.NoError(t, pErr.GoError())
+			descs := make([]roachpb.RangeDescriptor, len(br.RangeInfos))
+			for i, ri := range br.RangeInfos {
+				descs[i] = ri.Desc
+			}
+
+			// Sort the descriptors we got because their order is inconsistent between
+			// the subtests.
+			sort.Slice(descs, func(i, j int) bool {
+				return descs[i].RangeID < descs[j].RangeID
+			})
+
+			require.Equal(t, []roachpb.RangeDescriptor{lDesc, rDesc}, descs)
+		})
+	}
+}
+
 // TestDrainRangeRejection verifies that an attempt to transfer a range to a
 // draining store fails.
 func TestDrainRangeRejection(t *testing.T) {
@@ -2034,7 +2115,7 @@ func TestLeaseTransferInSnapshotUpdatesTimestampCache(t *testing.T) {
 	if _, err := txnOld.Inc(ctx, keyA, 4); err != nil {
 		t.Fatal(err)
 	}
-	const exp = `TransactionRetryError: retry txn \(RETRY_SERIALIZABLE\)`
+	const exp = `TransactionRetryError: retry txn \(RETRY_SERIALIZABLE - failed preemptive refresh\)`
 	if err := txnOld.Commit(ctx); !testutils.IsError(err, exp) {
 		t.Fatalf("expected retry error, got: %v; did we write under a read?", err)
 	}
@@ -3442,7 +3523,7 @@ func TestTenantID(t *testing.T) {
 		_, repl := getFirstStoreReplica(t, tc.Server(0), tenant2Prefix)
 		sawSnapshot := make(chan struct{}, 1)
 		blockSnapshot := make(chan struct{})
-		tc.AddServer(t, base.TestServerArgs{
+		tc.AddAndStartServer(t, base.TestServerArgs{
 			RaftConfig: raftConfig,
 			Insecure:   true,
 			Knobs: base.TestingKnobs{
@@ -3497,7 +3578,7 @@ func TestTenantID(t *testing.T) {
 	})
 	t.Run("(3) upon restart", func(t *testing.T) {
 		tc.StopServer(0)
-		tc.AddServer(t, stickySpecTestServerArgs)
+		tc.AddAndStartServer(t, stickySpecTestServerArgs)
 		_, repl := getFirstStoreReplica(t, tc.Server(2), tenant2Prefix)
 		ri := repl.State()
 		require.Equal(t, tenant2.ToUint64(), ri.TenantID, "%v", repl)

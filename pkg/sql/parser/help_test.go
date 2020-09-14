@@ -270,6 +270,9 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW SESSIONS ??`, `SHOW SESSIONS`},
 		{`SHOW LOCAL SESSIONS ??`, `SHOW SESSIONS`},
 
+		{`SHOW TRANSACTIONS ??`, `SHOW TRANSACTIONS`},
+		{`SHOW LOCAL TRANSACTIONS ??`, `SHOW TRANSACTIONS`},
+
 		{`SHOW STATISTICS ??`, `SHOW STATISTICS`},
 		{`SHOW STATISTICS FOR TABLE ??`, `SHOW STATISTICS`},
 
@@ -308,6 +311,7 @@ func TestContextualHelp(t *testing.T) {
 		{`SHOW DATABASES ??`, `SHOW DATABASES`},
 
 		{`SHOW ENUMS ??`, `SHOW ENUMS`},
+		{`SHOW TYPES ??`, `SHOW TYPES`},
 
 		{`SHOW GRANTS ON ??`, `SHOW GRANTS`},
 		{`SHOW GRANTS ON foo FOR ??`, `SHOW GRANTS`},
@@ -399,6 +403,8 @@ func TestContextualHelp(t *testing.T) {
 
 		{`COMMIT TRANSACTION ??`, `COMMIT`},
 		{`END ??`, `COMMIT`},
+
+		{`REFRESH ??`, `REFRESH`},
 
 		{`ROLLBACK TRANSACTION ??`, `ROLLBACK`},
 		{`ROLLBACK TO ??`, `ROLLBACK`},

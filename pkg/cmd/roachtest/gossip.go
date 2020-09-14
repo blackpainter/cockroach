@@ -271,10 +271,15 @@ func runGossipPeerings(ctx context.Context, t *test, c *cluster) {
 		t.l.Printf("%d: restarting node %d\n", i, node[0])
 		c.Stop(ctx, node)
 		c.Start(ctx, t, node)
+		// Sleep a bit to avoid hitting:
+		// https://github.com/cockroachdb/cockroach/issues/48005
+		time.Sleep(3 * time.Second)
 	}
 }
 
 func runGossipRestart(ctx context.Context, t *test, c *cluster) {
+	t.Skip("skipping flaky acceptance/gossip/restart", "https://github.com/cockroachdb/cockroach/issues/48423")
+
 	c.Put(ctx, cockroach, "./cockroach")
 	c.Start(ctx, t)
 

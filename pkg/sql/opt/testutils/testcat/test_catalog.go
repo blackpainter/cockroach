@@ -25,8 +25,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
+	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
@@ -214,6 +215,11 @@ func (tc *Catalog) HasAdminRole(ctx context.Context) (bool, error) {
 // RequireAdminRole is part of the cat.Catalog interface.
 func (tc *Catalog) RequireAdminRole(ctx context.Context, action string) error {
 	return nil
+}
+
+// HasRoleOption is part of the cat.Catalog interface.
+func (tc *Catalog) HasRoleOption(ctx context.Context, roleOption roleoption.Option) (bool, error) {
+	return true, nil
 }
 
 // FullyQualifiedName is part of the cat.Catalog interface.
@@ -552,23 +558,20 @@ func (tv *View) ColumnName(i int) tree.Name {
 
 // Table implements the cat.Table interface for testing purposes.
 type Table struct {
-	TabID         cat.StableID
-	TabVersion    int
-	TabName       tree.TableName
-	Columns       []*Column
-	SystemColumns []*Column
-	Indexes       []*Index
-	Stats         TableStats
-	Checks        []cat.CheckConstraint
-	Families      []*Family
-	IsVirtual     bool
-	Catalog       cat.Catalog
+	TabID      cat.StableID
+	TabVersion int
+	TabName    tree.TableName
+	Columns    []cat.Column
+	Indexes    []*Index
+	Stats      TableStats
+	Checks     []cat.CheckConstraint
+	Families   []*Family
+	IsVirtual  bool
+	Catalog    cat.Catalog
 
 	// If Revoked is true, then the user has had privileges on the table revoked.
 	Revoked bool
 
-	writeOnlyColCount  int
-	deleteOnlyColCount int
 	writeOnlyIdxCount  int
 	deleteOnlyIdxCount int
 
@@ -622,33 +625,19 @@ func (tt *Table) IsVirtualTable() bool {
 	return tt.IsVirtual
 }
 
+// IsMaterializedView is part of the cat.Table interface.
+func (tt *Table) IsMaterializedView() bool {
+	return false
+}
+
 // ColumnCount is part of the cat.Table interface.
 func (tt *Table) ColumnCount() int {
-	return len(tt.Columns) + len(tt.SystemColumns)
+	return len(tt.Columns)
 }
 
 // Column is part of the cat.Table interface.
-func (tt *Table) Column(i int) cat.Column {
-	if i >= len(tt.Columns) {
-		return tt.SystemColumns[i-len(tt.Columns)]
-	}
-	return tt.Columns[i]
-}
-
-// ColumnKind is part of the cat.Table interface.
-func (tt *Table) ColumnKind(i int) cat.ColumnKind {
-	writeOnlyEnd := len(tt.Columns) - tt.deleteOnlyColCount
-	standardEnd := writeOnlyEnd - tt.writeOnlyColCount
-	switch {
-	case i < standardEnd:
-		return cat.Ordinary
-	case i < writeOnlyEnd:
-		return cat.WriteOnly
-	case i < len(tt.Columns):
-		return cat.DeleteOnly
-	default:
-		return cat.System
-	}
+func (tt *Table) Column(i int) *cat.Column {
+	return &tt.Columns[i]
 }
 
 // IndexCount is part of the cat.Table interface.
@@ -724,7 +713,7 @@ func (tt *Table) InboundForeignKey(i int) cat.ForeignKeyConstraint {
 // FindOrdinal returns the ordinal of the column with the given name.
 func (tt *Table) FindOrdinal(name string) int {
 	for i, col := range tt.Columns {
-		if col.Name == name {
+		if col.ColName() == tree.Name(name) {
 			return i
 		}
 	}
@@ -931,91 +920,6 @@ func (ti *Index) GeoConfig() *geoindex.Config {
 	return ti.geoConfig
 }
 
-// Column implements the cat.Column interface for testing purposes.
-type Column struct {
-	Ordinal      int
-	Hidden       bool
-	Nullable     bool
-	Name         string
-	Type         *types.T
-	DefaultExpr  *string
-	ComputedExpr *string
-}
-
-var _ cat.Column = &Column{}
-
-// ColID is part of the cat.Index interface.
-func (tc *Column) ColID() cat.StableID {
-	return 1 + cat.StableID(tc.Ordinal)
-}
-
-// IsNullable is part of the cat.Column interface.
-func (tc *Column) IsNullable() bool {
-	return tc.Nullable
-}
-
-// ColName is part of the cat.Column interface.
-func (tc *Column) ColName() tree.Name {
-	return tree.Name(tc.Name)
-}
-
-// DatumType is part of the cat.Column interface.
-func (tc *Column) DatumType() *types.T {
-	return tc.Type
-}
-
-// ColTypePrecision is part of the cat.Column interface.
-func (tc *Column) ColTypePrecision() int {
-	if tc.Type.Family() == types.ArrayFamily {
-		if tc.Type.ArrayContents().Family() == types.ArrayFamily {
-			panic(errors.AssertionFailedf("column type should never be a nested array"))
-		}
-		return int(tc.Type.ArrayContents().Precision())
-	}
-	return int(tc.Type.Precision())
-}
-
-// ColTypeWidth is part of the cat.Column interface.
-func (tc *Column) ColTypeWidth() int {
-	if tc.Type.Family() == types.ArrayFamily {
-		if tc.Type.ArrayContents().Family() == types.ArrayFamily {
-			panic(errors.AssertionFailedf("column type should never be a nested array"))
-		}
-		return int(tc.Type.ArrayContents().Width())
-	}
-	return int(tc.Type.Width())
-}
-
-// ColTypeStr is part of the cat.Column interface.
-func (tc *Column) ColTypeStr() string {
-	return tc.Type.SQLString()
-}
-
-// IsHidden is part of the cat.Column interface.
-func (tc *Column) IsHidden() bool {
-	return tc.Hidden
-}
-
-// HasDefault is part of the cat.Column interface.
-func (tc *Column) HasDefault() bool {
-	return tc.DefaultExpr != nil
-}
-
-// IsComputed is part of the cat.Column interface.
-func (tc *Column) IsComputed() bool {
-	return tc.ComputedExpr != nil
-}
-
-// DefaultExprStr is part of the cat.Column interface.
-func (tc *Column) DefaultExprStr() string {
-	return *tc.DefaultExpr
-}
-
-// ComputedExprStr is part of the cat.Column interface.
-func (tc *Column) ComputedExprStr() string {
-	return *tc.ComputedExpr
-}
-
 // TableStat implements the cat.TableStatistic interface for testing purposes.
 type TableStat struct {
 	js stats.JSONStatistic
@@ -1072,7 +976,7 @@ func (ts *TableStat) Histogram() []cat.HistogramBucket {
 	histogram := make([]cat.HistogramBucket, len(ts.js.HistogramBuckets))
 	for i := range histogram {
 		bucket := &ts.js.HistogramBuckets[i]
-		datum, err := sqlbase.ParseDatumStringAs(colType, bucket.UpperBound, &evalCtx)
+		datum, err := rowenc.ParseDatumStringAs(colType, bucket.UpperBound, &evalCtx)
 		if err != nil {
 			panic(err)
 		}

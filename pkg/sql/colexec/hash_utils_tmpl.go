@@ -21,12 +21,12 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // {{/*
@@ -43,7 +43,7 @@ const _TYPE_WIDTH = 0
 // _ASSIGN_HASH is the template equality function for assigning the first input
 // to the result of the hash value of the second input.
 func _ASSIGN_HASH(_, _, _, _ interface{}) uint64 {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // */}}
@@ -103,7 +103,7 @@ func rehash(
 	sel []int,
 	cancelChecker CancelChecker,
 	overloadHelper overloadHelper,
-	datumAlloc *sqlbase.DatumAlloc,
+	datumAlloc *rowenc.DatumAlloc,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -132,6 +132,6 @@ func rehash(
 		}
 		// {{end}}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", col.Type()))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", col.Type()))
 	}
 }

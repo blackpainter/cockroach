@@ -44,7 +44,8 @@ feature-usage
 CREATE TABLE y (a SERIAL2)
 ----
 sql.schema.create_table
-sql.schema.new_column_type.int2
+sql.schema.new_column.qualification.default_expr
+sql.schema.new_column_type.int8
 sql.schema.serial.rowid.int2
 
 schema
@@ -65,3 +66,12 @@ table:_
  └── columns
       ├── _:int default: _
       └── _:int default: _
+
+feature-allowlist
+sql.schema.create_unlogged_table
+----
+
+feature-usage
+CREATE UNLOGGED TABLE unlogged_tbl(col int PRIMARY KEY)
+----
+sql.schema.create_unlogged_table

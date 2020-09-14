@@ -16,22 +16,150 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
 )
 
 type createIndexNode struct {
 	n         *tree.CreateIndex
-	tableDesc *sqlbase.MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
+}
+
+type indexStorageParamObserver struct {
+	indexDesc *descpb.IndexDescriptor
+}
+
+var _ storageParamObserver = (*indexStorageParamObserver)(nil)
+
+func getS2ConfigFromIndex(indexDesc *descpb.IndexDescriptor) *geoindex.S2Config {
+	var s2Config *geoindex.S2Config
+	if indexDesc.GeoConfig.S2Geometry != nil {
+		s2Config = indexDesc.GeoConfig.S2Geometry.S2Config
+	}
+	if indexDesc.GeoConfig.S2Geography != nil {
+		s2Config = indexDesc.GeoConfig.S2Geography.S2Config
+	}
+	return s2Config
+}
+
+func (a *indexStorageParamObserver) applyS2ConfigSetting(
+	evalCtx *tree.EvalContext, key string, expr tree.Datum, min int64, max int64,
+) error {
+	s2Config := getS2ConfigFromIndex(a.indexDesc)
+	if s2Config == nil {
+		return errors.Newf("index setting %q can only be set on GEOMETRY or GEOGRAPHY spatial indexes", key)
+	}
+
+	val, err := datumAsInt(evalCtx, key, expr)
+	if err != nil {
+		return errors.Wrapf(err, "error decoding %q", key)
+	}
+	if val < min || val > max {
+		return errors.Newf("%q value must be between %d and %d inclusive", key, min, max)
+	}
+	switch key {
+	case `s2_max_level`:
+		s2Config.MaxLevel = int32(val)
+	case `s2_level_mod`:
+		s2Config.LevelMod = int32(val)
+	case `s2_max_cells`:
+		s2Config.MaxCells = int32(val)
+	}
+
+	return nil
+}
+
+func (a *indexStorageParamObserver) applyGeometryIndexSetting(
+	evalCtx *tree.EvalContext, key string, expr tree.Datum,
+) error {
+	if a.indexDesc.GeoConfig.S2Geometry == nil {
+		return errors.Newf("%q can only be applied to GEOMETRY spatial indexes", key)
+	}
+	val, err := datumAsFloat(evalCtx, key, expr)
+	if err != nil {
+		return errors.Wrapf(err, "error decoding %q", key)
+	}
+	switch key {
+	case `geometry_min_x`:
+		a.indexDesc.GeoConfig.S2Geometry.MinX = val
+	case `geometry_max_x`:
+		a.indexDesc.GeoConfig.S2Geometry.MaxX = val
+	case `geometry_min_y`:
+		a.indexDesc.GeoConfig.S2Geometry.MinY = val
+	case `geometry_max_y`:
+		a.indexDesc.GeoConfig.S2Geometry.MaxY = val
+	default:
+		return errors.Newf("unknown key: %q", key)
+	}
+	return nil
+}
+
+func (a *indexStorageParamObserver) apply(
+	evalCtx *tree.EvalContext, key string, expr tree.Datum,
+) error {
+	switch key {
+	case `fillfactor`:
+		return applyFillFactorStorageParam(evalCtx, key, expr)
+	case `s2_max_level`:
+		return a.applyS2ConfigSetting(evalCtx, key, expr, 0, 30)
+	case `s2_level_mod`:
+		return a.applyS2ConfigSetting(evalCtx, key, expr, 1, 3)
+	case `s2_max_cells`:
+		return a.applyS2ConfigSetting(evalCtx, key, expr, 1, 32)
+	case `geometry_min_x`, `geometry_max_x`, `geometry_min_y`, `geometry_max_y`:
+		return a.applyGeometryIndexSetting(evalCtx, key, expr)
+	case `vacuum_cleanup_index_scale_factor`,
+		`buffering`,
+		`fastupdate`,
+		`gin_pending_list_limit`,
+		`pages_per_range`,
+		`autosummarize`:
+		return unimplemented.NewWithIssuef(43299, "storage parameter %q", key)
+	}
+	return errors.Errorf("invalid storage parameter %q", key)
+}
+
+func (a *indexStorageParamObserver) runPostChecks() error {
+	s2Config := getS2ConfigFromIndex(a.indexDesc)
+	if s2Config != nil {
+		if (s2Config.MaxLevel)%s2Config.LevelMod != 0 {
+			return errors.Newf(
+				"s2_max_level (%d) must be divisible by s2_level_mod (%d)",
+				s2Config.MaxLevel,
+				s2Config.LevelMod,
+			)
+		}
+	}
+
+	if cfg := a.indexDesc.GeoConfig.S2Geometry; cfg != nil {
+		if cfg.MaxX <= cfg.MinX {
+			return errors.Newf(
+				"geometry_max_x (%f) must be greater than geometry_min_x (%f)",
+				cfg.MaxX,
+				cfg.MinX,
+			)
+		}
+		if cfg.MaxY <= cfg.MinY {
+			return errors.Newf(
+				"geometry_max_y (%f) must be greater than geometry_min_y (%f)",
+				cfg.MaxY,
+				cfg.MinY,
+			)
+		}
+	}
+	return nil
 }
 
 // CreateIndex creates an index.
@@ -40,10 +168,25 @@ type createIndexNode struct {
 //          mysql requires INDEX on the table.
 func (p *planner) CreateIndex(ctx context.Context, n *tree.CreateIndex) (planNode, error) {
 	tableDesc, err := p.ResolveMutableTableDescriptor(
-		ctx, &n.Table, true /*required*/, tree.ResolveRequireTableDesc,
+		ctx, &n.Table, true /*required*/, tree.ResolveRequireTableOrViewDesc,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	if tableDesc.IsView() && !tableDesc.MaterializedView() {
+		return nil, pgerror.Newf(pgcode.WrongObjectType, "%q is not a table or materialized view", tableDesc.Name)
+	}
+
+	if tableDesc.MaterializedView() {
+		if n.Interleave != nil {
+			return nil, pgerror.New(pgcode.InvalidObjectDefinition,
+				"cannot create interleaved index on materialized view")
+		}
+		if n.Sharded != nil {
+			return nil, pgerror.New(pgcode.InvalidObjectDefinition,
+				"cannot create hash sharded index on materialized view")
+		}
 	}
 
 	if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
@@ -60,12 +203,12 @@ func (p *planner) CreateIndex(ctx context.Context, n *tree.CreateIndex) (planNod
 // not* re-use a pre-existing shard column.
 func (p *planner) setupFamilyAndConstraintForShard(
 	ctx context.Context,
-	tableDesc *MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	shardCol *descpb.ColumnDescriptor,
 	idxColumns []string,
 	buckets int32,
 ) error {
-	family := sqlbase.GetColumnFamilyForShard(tableDesc, idxColumns)
+	family := tabledesc.GetColumnFamilyForShard(tableDesc, idxColumns)
 	if family == "" {
 		return errors.AssertionFailedf("could not find column family for the first column in the index column set")
 	}
@@ -84,7 +227,7 @@ func (p *planner) setupFamilyAndConstraintForShard(
 	if err != nil {
 		return err
 	}
-	info, err := tableDesc.GetConstraintInfo(ctx, nil, p.ExecCfg().Codec)
+	info, err := tableDesc.GetConstraintInfo(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -117,7 +260,7 @@ func (p *planner) setupFamilyAndConstraintForShard(
 // is hash sharded. Note that `tableDesc` will be modified when this method is called for
 // a hash sharded index.
 func MakeIndexDescriptor(
-	params runParams, n *tree.CreateIndex, tableDesc *sqlbase.MutableTableDescriptor,
+	params runParams, n *tree.CreateIndex, tableDesc *tabledesc.Mutable,
 ) (*descpb.IndexDescriptor, error) {
 	// Ensure that the columns we want to index exist before trying to create the
 	// index.
@@ -206,10 +349,8 @@ func MakeIndexDescriptor(
 	}
 
 	if n.Predicate != nil {
-		// TODO(mgartner): remove this once partial indexes are fully supported.
-		if !params.SessionData().PartialIndexes {
-			return nil, pgerror.Newf(pgcode.FeatureNotSupported,
-				"session variable experimental_partial_indexes is set to false, cannot create a partial index")
+		if n.Inverted {
+			return nil, unimplemented.NewWithIssue(50952, "partial inverted indexes not supported")
 		}
 
 		idxValidator := schemaexpr.MakeIndexPredicateValidator(params.ctx, n.Table, tableDesc, &params.p.semaCtx)
@@ -223,21 +364,29 @@ func MakeIndexDescriptor(
 	if err := indexDesc.FillColumns(n.Columns); err != nil {
 		return nil, err
 	}
+
+	if err := applyStorageParameters(
+		params.ctx,
+		params.p.SemaCtx(),
+		params.EvalContext(),
+		n.StorageParams,
+		&indexStorageParamObserver{indexDesc: &indexDesc},
+	); err != nil {
+		return nil, err
+	}
 	return &indexDesc, nil
 }
 
 // validateIndexColumnsExists validates that the columns for an index exist
 // in the table and are not being dropped prior to attempting to add the index.
-func validateIndexColumnsExist(
-	desc *sqlbase.MutableTableDescriptor, columns tree.IndexElemList,
-) error {
+func validateIndexColumnsExist(desc *tabledesc.Mutable, columns tree.IndexElemList) error {
 	for _, column := range columns {
 		_, dropping, err := desc.FindColumnByName(column.Column)
 		if err != nil {
 			return err
 		}
 		if dropping {
-			return sqlbase.NewUndefinedColumnError(string(column.Column))
+			return colinfo.NewUndefinedColumnError(string(column.Column))
 		}
 	}
 	return nil
@@ -261,7 +410,7 @@ func setupShardedIndex(
 	shardedIndexEnabled bool,
 	columns *tree.IndexElemList,
 	bucketsExpr tree.Expr,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	indexDesc *descpb.IndexDescriptor,
 	isNewTable bool,
 ) (shard *descpb.ColumnDescriptor, newColumn bool, err error) {
@@ -277,7 +426,7 @@ func setupShardedIndex(
 	for _, c := range *columns {
 		colNames = append(colNames, string(c.Column))
 	}
-	buckets, err := sqlbase.EvalShardBucketCount(ctx, semaCtx, evalCtx, bucketsExpr)
+	buckets, err := tabledesc.EvalShardBucketCount(ctx, semaCtx, evalCtx, bucketsExpr)
 	if err != nil {
 		return nil, false, err
 	}
@@ -304,7 +453,7 @@ func setupShardedIndex(
 // `desc`, if one doesn't already exist for the given index column set and number of shard
 // buckets.
 func maybeCreateAndAddShardCol(
-	shardBuckets int, desc *sqlbase.MutableTableDescriptor, colNames []string, isNewTable bool,
+	shardBuckets int, desc *tabledesc.Mutable, colNames []string, isNewTable bool,
 ) (col *descpb.ColumnDescriptor, created bool, err error) {
 	shardCol, err := makeShardColumnDesc(colNames, shardBuckets)
 	if err != nil {
@@ -323,7 +472,7 @@ func maybeCreateAndAddShardCol(
 		}
 		return existingShardCol, false, nil
 	}
-	columnIsUndefined := sqlbase.IsUndefinedColumnError(err)
+	columnIsUndefined := sqlerrors.IsUndefinedColumnError(err)
 	if err != nil && !columnIsUndefined {
 		return nil, false, err
 	}

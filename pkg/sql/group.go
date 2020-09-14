@@ -13,9 +13,8 @@ package sql
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 )
 
@@ -23,7 +22,7 @@ import (
 // It "wraps" a planNode which is used to retrieve the ungrouped results.
 type groupNode struct {
 	// The schema for this groupNode.
-	columns sqlbase.ResultColumns
+	columns colinfo.ResultColumns
 
 	// The source node (which returns values that feed into the aggregation).
 	plan planNode
@@ -33,7 +32,7 @@ type groupNode struct {
 
 	// Set when we have an input ordering on (a subset of) grouping columns. Only
 	// column indices in groupCols can appear in this ordering.
-	groupColOrdering sqlbase.ColumnOrdering
+	groupColOrdering colinfo.ColumnOrdering
 
 	// isScalar is set for "scalar groupby", where we want a result
 	// even if there are no input rows, e.g. SELECT MIN(x) FROM t.
@@ -62,22 +61,6 @@ func (n *groupNode) Close(ctx context.Context) {
 	for _, f := range n.funcs {
 		f.close(ctx)
 	}
-}
-
-// aggIsGroupingColumn returns true if the given output aggregation is an
-// any_not_null aggregation for a grouping column. The grouping column
-// index is also returned.
-func (n *groupNode) aggIsGroupingColumn(aggIdx int) (colIdx int, ok bool) {
-	if holder := n.funcs[aggIdx]; holder.funcName == builtins.AnyNotNull {
-		for _, c := range n.groupCols {
-			for _, renderIdx := range holder.argRenderIdxs {
-				if c == renderIdx {
-					return c, true
-				}
-			}
-		}
-	}
-	return -1, false
 }
 
 type aggregateFuncHolder struct {

@@ -18,6 +18,7 @@ import (
 	gosql "database/sql"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"math/rand"
 	"net/url"
@@ -445,7 +446,12 @@ type testClusterConfig struct {
 	// If true, a sql tenant server will be started and pointed at a node in the
 	// cluster. Connections on behalf of the logic test will go to that tenant.
 	useTenant bool
+	// isCCLConfig should be true for any config that can only be run with a CCL
+	// binary.
+	isCCLConfig bool
 }
+
+const threeNodeTenantConfigName = "3node-tenant"
 
 // logicTestConfigs contains all possible cluster configs. A test file can
 // specify a list of configs they run on in a file-level comment like:
@@ -612,12 +618,18 @@ var logicTestConfigs = []testClusterConfig{
 		overrideExperimentalDistSQLPlanning: "on",
 	},
 	{
-		name:     "3node-tenant",
+		// 3node-tenant is a config that runs the test as a SQL tenant. This config
+		// can only be run with a CCL binary, so is a noop if run through the normal
+		// logictest command.
+		// To run a logic test with this config as a directive, run:
+		// make test PKG=./pkg/ccl/logictestccl TESTS=TestTenantLogic//<test_name>
+		name:     threeNodeTenantConfigName,
 		numNodes: 3,
 		// overrideAutoStats will disable automatic stats on the cluster this tenant
 		// is connected to.
 		overrideAutoStats: "false",
 		useTenant:         true,
+		isCCLConfig:       true,
 	},
 }
 
@@ -1272,7 +1284,7 @@ func (t *logicTest) setup(cfg testClusterConfig, serverArgs TestServerArgs) {
 		if params.ServerArgs.Knobs.Server == nil {
 			params.ServerArgs.Knobs.Server = &server.TestingKnobs{}
 		}
-		params.ServerArgs.Knobs.Server.(*server.TestingKnobs).BootstrapVersionOverride = cfg.bootstrapVersion
+		params.ServerArgs.Knobs.Server.(*server.TestingKnobs).BinaryVersionOverride = cfg.bootstrapVersion
 	}
 	if cfg.disableUpgrade {
 		if params.ServerArgs.Knobs.Server == nil {
@@ -1305,7 +1317,7 @@ func (t *logicTest) setup(cfg testClusterConfig, serverArgs TestServerArgs) {
 	stats.DefaultAsOfTime = 10 * time.Millisecond
 	stats.DefaultRefreshInterval = time.Millisecond
 
-	t.cluster = serverutils.StartTestCluster(t.rootT, cfg.numNodes, params)
+	t.cluster = serverutils.StartNewTestCluster(t.rootT, cfg.numNodes, params)
 	if cfg.useFakeSpanResolver {
 		fakeResolver := physicalplanutils.FakeResolverForTestCluster(t.cluster)
 		t.cluster.Server(t.nodeIdx).SetDistSQLSpanResolver(fakeResolver)
@@ -1314,7 +1326,7 @@ func (t *logicTest) setup(cfg testClusterConfig, serverArgs TestServerArgs) {
 	connsForClusterSettingChanges := []*gosql.DB{t.cluster.ServerConn(0)}
 	if cfg.useTenant {
 		var err error
-		t.tenantAddr, err = t.cluster.Server(t.nodeIdx).StartTenant(base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), AllowSettingClusterSettings: true})
+		t.tenantAddr, _, err = t.cluster.Server(t.nodeIdx).StartTenant(base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), AllowSettingClusterSettings: true})
 		if err != nil {
 			t.rootT.Fatalf("%+v", err)
 		}
@@ -1332,6 +1344,33 @@ func (t *logicTest) setup(cfg testClusterConfig, serverArgs TestServerArgs) {
 		}
 		defer db.Close()
 		connsForClusterSettingChanges = append(connsForClusterSettingChanges, db)
+
+		// Increase tenant rate limits for faster tests.
+		conn := t.cluster.ServerConn(0)
+		for _, settingName := range []string{
+			"kv.tenant_rate_limiter.read_requests.rate_limit",
+			"kv.tenant_rate_limiter.read_requests.burst_limit",
+			"kv.tenant_rate_limiter.write_requests.rate_limit",
+			"kv.tenant_rate_limiter.write_requests.burst_limit",
+		} {
+			if _, err := conn.Exec(
+				fmt.Sprintf("SET CLUSTER SETTING %s = %d", settingName, 100000),
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, settingName := range []string{
+			"kv.tenant_rate_limiter.read_bytes.rate_limit",
+			"kv.tenant_rate_limiter.read_bytes.burst_limit",
+			"kv.tenant_rate_limiter.write_bytes.rate_limit",
+			"kv.tenant_rate_limiter.write_bytes.burst_limit",
+		} {
+			if _, err := conn.Exec(
+				fmt.Sprintf("SET CLUSTER SETTING %s = '1GB'", settingName),
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 
 	// Set cluster settings.
@@ -2661,15 +2700,21 @@ type TestServerArgs struct {
 // RunLogicTest is the main entry point for the logic test. The globs parameter
 // specifies the default sets of files to run.
 func RunLogicTest(t *testing.T, serverArgs TestServerArgs, globs ...string) {
-	RunLogicTestWithDefaultConfig(t, serverArgs, *overrideConfig, globs...)
+	RunLogicTestWithDefaultConfig(t, serverArgs, *overrideConfig, false /* runCCLConfigs */, globs...)
 }
 
 // RunLogicTestWithDefaultConfig is the main entry point for the logic test.
 // The globs parameter specifies the default sets of files to run. The config
 // override parameter, if not empty, specifies the set of configurations to run
 // those files in. If empty, the default set of configurations is used.
+// runCCLConfigs specifies whether the test runner should skip configs that can
+// only be run with a CCL binary.
 func RunLogicTestWithDefaultConfig(
-	t *testing.T, serverArgs TestServerArgs, configOverride string, globs ...string,
+	t *testing.T,
+	serverArgs TestServerArgs,
+	configOverride string,
+	runCCLConfigs bool,
+	globs ...string,
 ) {
 	// Note: there is special code in teamcity-trigger/main.go to run this package
 	// with less concurrency in the nightly stress runs. If you see problems
@@ -2737,9 +2782,15 @@ func RunLogicTestWithDefaultConfig(
 	for _, path := range paths {
 		configs := readTestFileConfigs(t, path, configDefaults)
 		for _, idx := range configs {
-			configName := logicTestConfigs[idx].name
+			config := logicTestConfigs[idx]
+			configName := config.name
 			if _, ok := configFilter[configName]; configFilter != nil && !ok {
 				// Config filter present but not containing test.
+				continue
+			}
+			if config.isCCLConfig && !runCCLConfigs {
+				// Config is a CCL config and the caller specified that CCL configs
+				// should not be run.
 				continue
 			}
 			configPaths[idx] = append(configPaths[idx], path)
@@ -2768,6 +2819,10 @@ func RunLogicTestWithDefaultConfig(
 	defer logScope.Close(t)
 
 	verbose := testing.Verbose() || log.V(1)
+
+	// Only used in rewrite mode, where we don't need to run the same file through
+	// multiple configs.
+	seenPaths := make(map[string]struct{})
 	for idx, cfg := range logicTestConfigs {
 		paths := configPaths[idx]
 		if len(paths) == 0 {
@@ -2788,6 +2843,13 @@ func RunLogicTestWithDefaultConfig(
 				path := path // Rebind range variable.
 				// Inner test: one per file path.
 				t.Run(filepath.Base(path), func(t *testing.T) {
+					if *rewriteResultsInTestfiles {
+						if _, seen := seenPaths[path]; seen {
+							skip.IgnoreLint(t, "test file already rewritten")
+						}
+						seenPaths[path] = struct{}{}
+					}
+
 					// Run the test in parallel, unless:
 					//  - we're printing out all of the SQL interactions, or
 					//  - we're generating testfiles, or
@@ -2840,6 +2902,89 @@ func RunLogicTestWithDefaultConfig(
 			progress.total, progress.totalFail, unsupportedMsg,
 		)
 	}
+}
+
+// RunSQLLiteLogicTest is the main entry point to run the suite of SQLLite logic
+// tests. It runs logic tests from CockroachDB's fork of sqllogictest:
+//
+//   https://www.sqlite.org/sqllogictest/doc/trunk/about.wiki
+//
+// This fork contains many generated tests created by the SqlLite project that
+// ensure the tested SQL database returns correct statement and query output.
+// The logic tests are reasonably independent of the specific dialect of each
+// database so that they can be retargeted. In fact, the expected output for
+// each test can be generated by one database and then used to verify the output
+// of another database.
+//
+// The tests are run with the default set of configurations specified in
+// configOverride. If empty, the default set of configurations is used.
+//
+// By default, these tests are skipped, unless the `bigtest` flag is specified.
+// The reason for this is that these tests are contained in another repo that
+// must be present on the machine, and because they take a long time to run.
+//
+// See the comments in logic.go for more details.
+func RunSQLLiteLogicTest(t *testing.T, configOverride string) {
+	runSQLLiteLogicTest(t,
+		configOverride,
+		"/test/index/between/*/*.test",
+		"/test/index/commute/*/*.test",
+		"/test/index/delete/*/*.test",
+		"/test/index/in/*/*.test",
+		"/test/index/orderby/*/*.test",
+		"/test/index/orderby_nosort/*/*.test",
+		"/test/index/view/*/*.test",
+
+		"/test/select1.test",
+		"/test/select2.test",
+		"/test/select3.test",
+		"/test/select4.test",
+
+		// TODO(andyk): No support for join ordering yet, so this takes too long.
+		// "/test/select5.test",
+
+		// TODO(pmattis): Incompatibilities in numeric types.
+		// For instance, we type SUM(int) as a decimal since all of our ints are
+		// int64.
+		// "/test/random/expr/*.test",
+
+		// TODO(pmattis): We don't support unary + on strings.
+		// "/test/index/random/*/*.test",
+		// "/test/random/aggregates/*.test",
+		// "/test/random/groupby/*.test",
+		// "/test/random/select/*.test",
+	)
+}
+
+func runSQLLiteLogicTest(t *testing.T, configOverride string, globs ...string) {
+	if !*bigtest {
+		skip.IgnoreLint(t, "-bigtest flag must be specified to run this test")
+	}
+
+	logicTestPath := build.Default.GOPATH + "/src/github.com/cockroachdb/sqllogictest"
+	if _, err := os.Stat(logicTestPath); os.IsNotExist(err) {
+		fullPath, err := filepath.Abs(logicTestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("unable to find sqllogictest repo: %s\n"+
+			"git clone https://github.com/cockroachdb/sqllogictest %s",
+			logicTestPath, fullPath)
+		return
+	}
+
+	// Prefix the globs with the logicTestPath.
+	prefixedGlobs := make([]string, len(globs))
+	for i, glob := range globs {
+		prefixedGlobs[i] = logicTestPath + glob
+	}
+
+	// SQLLite logic tests can be very disk (with '-disk' configs) intensive,
+	// so we give them larger temp storage limit than other logic tests get.
+	serverArgs := TestServerArgs{
+		tempStorageDiskLimit: 512 << 20, // 512 MiB
+	}
+	RunLogicTestWithDefaultConfig(t, serverArgs, configOverride, true /* runCCLConfigs */, prefixedGlobs...)
 }
 
 type errorSummaryEntry struct {

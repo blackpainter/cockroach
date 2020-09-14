@@ -170,12 +170,14 @@ func initGEOS(dirs []string) (*C.CR_GEOS, string, error) {
 	var err error
 	for _, dir := range dirs {
 		var ret *C.CR_GEOS
-		errStr := C.CR_GEOS_Init(
-			goToCSlice([]byte(filepath.Join(dir, getLibraryExt(libgeoscFileName)))),
-			goToCSlice([]byte(filepath.Join(dir, getLibraryExt(libgeosFileName)))),
-			&ret,
+		newErr := statusToError(
+			C.CR_GEOS_Init(
+				goToCSlice([]byte(filepath.Join(dir, getLibraryExt(libgeoscFileName)))),
+				goToCSlice([]byte(filepath.Join(dir, getLibraryExt(libgeosFileName)))),
+				&ret,
+			),
 		)
-		if errStr.data == nil {
+		if newErr == nil {
 			return ret, dir, nil
 		}
 		err = errors.CombineErrors(
@@ -183,7 +185,7 @@ func initGEOS(dirs []string) (*C.CR_GEOS, string, error) {
 			errors.Newf(
 				"geos: cannot load GEOS from dir %q: %s",
 				dir,
-				string(cSliceToUnsafeGoBytes(errStr)),
+				newErr,
 			),
 		)
 	}
@@ -204,13 +206,9 @@ func goToCSlice(b []byte) C.CR_GEOS_Slice {
 	}
 }
 
-// c{String,Slice}ToUnsafeGoBytes convert a CR_GEOS_{String,Slice} to a Go
+// cStringToUnsafeGoBytes convert a CR_GEOS_String to a Go
 // byte slice that refer to the underlying C memory.
 func cStringToUnsafeGoBytes(s C.CR_GEOS_String) []byte {
-	return cToUnsafeGoBytes(s.data, s.len)
-}
-
-func cSliceToUnsafeGoBytes(s C.CR_GEOS_Slice) []byte {
 	return cToUnsafeGoBytes(s.data, s.len)
 }
 
@@ -341,6 +339,45 @@ func Length(ewkb geopb.EWKB) (float64, error) {
 	return float64(length), nil
 }
 
+// Normalize returns the geometry in its normalized form.
+func Normalize(a geopb.EWKB) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(C.CR_GEOS_Normalize(g, goToCSlice(a), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
+// LineMerge merges multilinestring constituents.
+func LineMerge(a geopb.EWKB) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(C.CR_GEOS_LineMerge(g, goToCSlice(a), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
+// IsSimple returns whether the EWKB is simple.
+func IsSimple(ewkb geopb.EWKB) (bool, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return false, err
+	}
+	var ret C.char
+	if err := statusToError(C.CR_GEOS_IsSimple(g, goToCSlice(ewkb), &ret)); err != nil {
+		return false, err
+	}
+	return ret == 1, nil
+}
+
 // Centroid returns the centroid of an EWKB.
 func Centroid(ewkb geopb.EWKB) (geopb.EWKB, error) {
 	g, err := ensureInitInternal()
@@ -362,6 +399,37 @@ func ConvexHull(ewkb geopb.EWKB) (geopb.EWKB, error) {
 	}
 	var cEWKB C.CR_GEOS_String
 	if err := statusToError(C.CR_GEOS_ConvexHull(g, goToCSlice(ewkb), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
+// Simplify returns an EWKB which returns the simplified EWKB.
+func Simplify(ewkb geopb.EWKB, tolerance float64) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(
+		C.CR_GEOS_Simplify(g, goToCSlice(ewkb), &cEWKB, C.double(tolerance)),
+	); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
+// TopologyPreserveSimplify returns an EWKB which returns the simplified EWKB
+// with the topology preserved.
+func TopologyPreserveSimplify(ewkb geopb.EWKB, tolerance float64) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(
+		C.CR_GEOS_TopologyPreserveSimplify(g, goToCSlice(ewkb), &cEWKB, C.double(tolerance)),
+	); err != nil {
 		return nil, err
 	}
 	return cStringToSafeGoBytes(cEWKB), nil
@@ -406,6 +474,19 @@ func Union(a geopb.EWKB, b geopb.EWKB) (geopb.EWKB, error) {
 	return cStringToSafeGoBytes(cEWKB), nil
 }
 
+// SymDifference returns an EWKB which is the symmetric difference of shapes A and B.
+func SymDifference(a geopb.EWKB, b geopb.EWKB) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(C.CR_GEOS_SymDifference(g, goToCSlice(a), goToCSlice(b), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
 // InterpolateLine returns the point along the given LineString which is at
 // a given distance from starting point.
 // Note: For distance less than 0 it returns start point similarly for distance
@@ -438,8 +519,8 @@ func MinDistance(a geopb.EWKB, b geopb.EWKB) (float64, error) {
 	return float64(distance), nil
 }
 
-// ClipEWKBByRect clips a EWKB to the specified rectangle.
-func ClipEWKBByRect(
+// ClipByRect clips a EWKB to the specified rectangle.
+func ClipByRect(
 	ewkb geopb.EWKB, xMin float64, yMin float64, xMax float64, yMax float64,
 ) (geopb.EWKB, error) {
 	g, err := ensureInitInternal()
@@ -447,7 +528,7 @@ func ClipEWKBByRect(
 		return nil, err
 	}
 	var cEWKB C.CR_GEOS_String
-	if err := statusToError(C.CR_GEOS_ClipEWKBByRect(g, goToCSlice(ewkb), C.double(xMin),
+	if err := statusToError(C.CR_GEOS_ClipByRect(g, goToCSlice(ewkb), C.double(xMin),
 		C.double(yMin), C.double(xMax), C.double(yMax), &cEWKB)); err != nil {
 		return nil, err
 	}
@@ -693,6 +774,21 @@ func MakeValid(ewkb geopb.EWKB) (geopb.EWKB, error) {
 	}
 	var cEWKB C.CR_GEOS_String
 	if err := statusToError(C.CR_GEOS_MakeValid(g, goToCSlice(ewkb), &cEWKB)); err != nil {
+		return nil, err
+	}
+	return cStringToSafeGoBytes(cEWKB), nil
+}
+
+// SharedPaths Returns a EWKB containing paths shared by the two given EWKBs.
+func SharedPaths(a geopb.EWKB, b geopb.EWKB) (geopb.EWKB, error) {
+	g, err := ensureInitInternal()
+	if err != nil {
+		return nil, err
+	}
+	var cEWKB C.CR_GEOS_String
+	if err := statusToError(
+		C.CR_GEOS_SharedPaths(g, goToCSlice(a), goToCSlice(b), &cEWKB),
+	); err != nil {
 		return nil, err
 	}
 	return cStringToSafeGoBytes(cEWKB), nil

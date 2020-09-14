@@ -29,13 +29,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/distsql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
@@ -176,7 +177,7 @@ type errorReportingRowReceiver struct {
 var _ execinfra.RowReceiver = &errorReportingRowReceiver{}
 
 func (r *errorReportingRowReceiver) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	if r.t.Failed() || (meta != nil && meta.Err != nil) {
 		if !r.t.Failed() {
@@ -641,7 +642,7 @@ func TestCSVImportCanBeResumed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
@@ -748,7 +749,7 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	const batchSize = 5
 	defer TestingSetParallelImporterReaderBatchSize(batchSize)()
 	defer row.TestingSetDatumRowConverterBatchSize(2 * batchSize)()
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	s, db, _ := serverutils.StartServer(t,
 		base.TestServerArgs{
@@ -843,6 +844,30 @@ func TestCSVImportMarksFilesFullyProcessed(t *testing.T) {
 	assert.Zero(t, importSummary.Rows)
 }
 
+func TestImportWithPartialIndexesErrs(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	s, db, _ := serverutils.StartServer(t,
+		base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				RegistryLiveness: jobs.NewFakeNodeLiveness(1),
+				DistSQL: &execinfra.TestingKnobs{
+					BulkAdderFlushesEveryBatch: true,
+				},
+			},
+		})
+	ctx := context.Background()
+	defer s.Stopper().Stop(ctx)
+
+	sqlDB := sqlutils.MakeSQLRunner(db)
+	sqlDB.Exec(t, `CREATE DATABASE d`)
+	sqlDB.Exec(t, "CREATE TABLE t (id INT, data STRING, INDEX (data) WHERE id > 0)")
+	defer sqlDB.Exec(t, `DROP TABLE t`)
+
+	sqlDB.ExpectErr(t, "cannot import into table with partial indexes", `IMPORT INTO t (id, data) CSV DATA ('https://foo.bar')`)
+}
+
 func (ses *generatedStorage) externalStorageFactory() cloud.ExternalStorageFactory {
 	return func(_ context.Context, es roachpb.ExternalStorage) (cloud.ExternalStorage, error) {
 		uri, err := url.Parse(es.HttpPath.BaseUri)
@@ -880,7 +905,7 @@ func newTestSpec(t *testing.T, format roachpb.IOFileFormat, inputs ...string) te
 
 	// Initialize table descriptor for import. We need valid descriptor to run
 	// converters, even though we don't actually import anything in this test.
-	var descr *sqlbase.ImmutableTableDescriptor
+	var descr *tabledesc.Mutable
 	switch format.Format {
 	case roachpb.IOFileFormat_CSV:
 		descr = descForTable(t,

@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/debug"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -380,7 +381,7 @@ func TestAdminAPIDatabases(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if a, e := len(details.Grants), 4; a != e {
+			if a, e := len(details.Grants), 2; a != e {
 				t.Fatalf("# of grants %d != expected %d", a, e)
 			}
 
@@ -454,7 +455,7 @@ func TestAdminAPIDatabaseSQLInjection(t *testing.T) {
 func TestAdminAPINonTableStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 	s := testCluster.Server(0)
 
@@ -495,7 +496,7 @@ func TestAdminAPINonTableStats(t *testing.T) {
 func TestRangeCount(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 	s := testCluster.Server(0)
 
@@ -1512,7 +1513,7 @@ func TestAdminAPILocations(t *testing.T) {
 		)
 	}
 	var res serverpb.LocationsResponse
-	if err := getAdminJSONProto(s, "locations", &res); err != nil {
+	if err := getAdminJSONProtoWithAdminOption(s, "locations", &res, false /* isAdmin */); err != nil {
 		t.Fatal(err)
 	}
 	for i, loc := range testLocations {
@@ -1710,7 +1711,7 @@ func TestAdminAPIDataDistribution(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 
 	firstServer := testCluster.Server(0)
@@ -1806,7 +1807,7 @@ func TestAdminAPIDataDistribution(t *testing.T) {
 
 func BenchmarkAdminAPIDataDistribution(b *testing.B) {
 	skip.UnderShort(b, "TODO: fix benchmark")
-	testCluster := serverutils.StartTestCluster(b, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(b, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 
 	firstServer := testCluster.Server(0)
@@ -1836,7 +1837,7 @@ func BenchmarkAdminAPIDataDistribution(b *testing.B) {
 func TestEnqueueRange(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 	})
 	defer testCluster.Stopper().Stop(context.Background())
@@ -1930,7 +1931,7 @@ func TestEnqueueRange(t *testing.T) {
 func TestStatsforSpanOnLocalMax(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 	firstServer := testCluster.Server(0)
 	adminServer := firstServer.(*TestServer).Server.admin
@@ -1944,4 +1945,31 @@ func TestStatsforSpanOnLocalMax(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestEndpointTelemetryBasic tests that the telemetry collection on the usage of
+// CRDB's endpoints works as expected by recording the call counts of `Admin` &
+// `Status` requests.
+func TestEndpointTelemetryBasic(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(context.Background())
+
+	// Check that calls over HTTP are recorded.
+	var details serverpb.LocationsResponse
+	if err := getAdminJSONProto(s, "locations", &details); err != nil {
+		t.Fatal(err)
+	}
+	require.GreaterOrEqual(t, telemetry.Read(getServerEndpointCounter(
+		"/cockroach.server.serverpb.Admin/Locations",
+	)), int32(1))
+
+	var resp serverpb.StatementsResponse
+	if err := getStatusJSONProto(s, "statements", &resp); err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, int32(1), telemetry.Read(getServerEndpointCounter(
+		"/cockroach.server.serverpb.Status/Statements",
+	)))
 }

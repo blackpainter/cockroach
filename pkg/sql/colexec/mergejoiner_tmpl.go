@@ -21,13 +21,13 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // {{/*
@@ -45,7 +45,7 @@ const _TYPE_WIDTH = 0
 // _ASSIGN_EQ is the template equality function for assigning the first input
 // to the result of the second input == the third input.
 func _ASSIGN_EQ(_, _, _, _, _, _ interface{}) int {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // _ASSIGN_CMP is the template equality function for assigning the first input
@@ -370,7 +370,7 @@ func _PROBE_SWITCH(
 		}
 		// {{end}}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 	}
 	// {{end}}
 	// {{/*
@@ -392,7 +392,7 @@ func _LEFT_UNMATCHED_GROUP_SWITCH(_JOIN_TYPE joinTypeInfo) { // */}}
 	// {{if or $.JoinType.IsLeftOuter $.JoinType.IsLeftAnti}}
 	if lGroup.unmatched {
 		if curLIdx+1 != curLEndIdx {
-			colexecerror.InternalError(fmt.Sprintf("unexpectedly length %d of the left unmatched group is not 1", curLEndIdx-curLIdx))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpectedly length %d of the left unmatched group is not 1", curLEndIdx-curLIdx))
 		}
 		// The row already does not have a match, so we don't need to do any
 		// additional processing.
@@ -434,7 +434,7 @@ func _RIGHT_UNMATCHED_GROUP_SWITCH(_JOIN_TYPE joinTypeInfo) { // */}}
 	// {{if $.JoinType.IsRightOuter}}
 	if rGroup.unmatched {
 		if curRIdx+1 != curREndIdx {
-			colexecerror.InternalError(fmt.Sprintf("unexpectedly length %d of the right unmatched group is not 1", curREndIdx-curRIdx))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpectedly length %d of the right unmatched group is not 1", curREndIdx-curRIdx))
 		}
 		// The row already does not have a match, so we don't need to do any
 		// additional processing.
@@ -747,8 +747,8 @@ func _LEFT_SWITCH(_JOIN_TYPE joinTypeInfo, _HAS_SELECTION bool, _HAS_NULLS bool)
 
 					repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 					toAppend := repeatsLeft
-					if outStartIdx+toAppend > outputBatchSize {
-						toAppend = outputBatchSize - outStartIdx
+					if outStartIdx+toAppend > o.output.Capacity() {
+						toAppend = o.output.Capacity() - outStartIdx
 					}
 
 					// {{if _JOIN_TYPE.IsRightOuter}}
@@ -798,7 +798,7 @@ func _LEFT_SWITCH(_JOIN_TYPE joinTypeInfo, _HAS_SELECTION bool, _HAS_NULLS bool)
 		}
 		// {{end}}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 	}
 	// {{end}}
 	// {{/*
@@ -832,7 +832,6 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildLeftGroupsFromBatch(
 ) {
 	sel := batch.Selection()
 	initialBuilderState := o.builderState.left
-	outputBatchSize := o.outputBatchSize
 	o.unlimitedAllocator.PerformOperation(
 		o.output.ColVecs()[:len(input.sourceTypes)],
 		func() {
@@ -935,8 +934,8 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								// {{if _JOIN_TYPE.IsSetOp}}
@@ -1002,7 +1001,7 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildLeftBufferedGroup(
 						}
 					// {{end}}
 					default:
-						colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+						colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 					}
 					if colIdx == len(input.sourceTypes)-1 {
 						// We have appended some tuples into the output batch from the current
@@ -1065,8 +1064,8 @@ func _RIGHT_SWITCH(_JOIN_TYPE joinTypeInfo, _HAS_SELECTION bool, _HAS_NULLS bool
 						o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 					}
 					toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-					if outStartIdx+toAppend > outputBatchSize {
-						toAppend = outputBatchSize - outStartIdx
+					if outStartIdx+toAppend > o.output.Capacity() {
+						toAppend = o.output.Capacity() - outStartIdx
 					}
 
 					// {{if _JOIN_TYPE.IsLeftOuter}}
@@ -1142,7 +1141,7 @@ func _RIGHT_SWITCH(_JOIN_TYPE joinTypeInfo, _HAS_SELECTION bool, _HAS_NULLS bool
 		}
 	// {{end}}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 	}
 	// {{end}}
 	// {{/*
@@ -1174,8 +1173,6 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildRightGroupsFromBatch(
 ) {
 	initialBuilderState := o.builderState.right
 	sel := batch.Selection()
-	outputBatchSize := o.outputBatchSize
-
 	o.unlimitedAllocator.PerformOperation(
 		o.output.ColVecs()[colOffset:colOffset+len(input.sourceTypes)],
 		func() {
@@ -1244,8 +1241,8 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildRightBufferedGroup(
 				batchLength := currentBatch.Length()
 				for batchLength > 0 {
 					toAppend := batchLength - o.builderState.right.curSrcStartIdx
-					if outStartIdx+toAppend > o.outputBatchSize {
-						toAppend = o.outputBatchSize - outStartIdx
+					if outStartIdx+toAppend > o.output.Capacity() {
+						toAppend = o.output.Capacity() - outStartIdx
 					}
 
 					// Loop over every column.
@@ -1286,7 +1283,7 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) buildRightBufferedGroup(
 							}
 							// {{end}}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 					outStartIdx += toAppend
@@ -1509,9 +1506,9 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) calculateOutputCount(groups []group) int 
 		// {{end}}
 		count += groups[i].toBuild
 		groups[i].toBuild = 0
-		if count > o.outputBatchSize {
-			groups[i].toBuild = count - o.outputBatchSize
-			count = o.outputBatchSize
+		if count > o.output.Capacity() {
+			groups[i].toBuild = count - o.output.Capacity()
+			count = o.output.Capacity()
 			return count
 		}
 	}
@@ -1541,7 +1538,7 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) build(ctx context.Context) {
 		// {{end}}
 
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unsupported mjBuildFrom %d", o.builderState.buildFrom))
+			colexecerror.InternalError(errors.AssertionFailedf("unsupported mjBuildFrom %d", o.builderState.buildFrom))
 		}
 	}
 }
@@ -1597,7 +1594,7 @@ func _SOURCE_FINISHED_SWITCH(_JOIN_TYPE joinTypeInfo) { // */}}
 // */}}
 
 func (o *mergeJoin_JOIN_TYPE_STRINGOp) Next(ctx context.Context) coldata.Batch {
-	o.output.ResetInternalBatch()
+	o.output, _ = o.unlimitedAllocator.ResetMaybeReallocate(o.outputTypes, o.output, 1 /* minCapacity */)
 	for {
 		switch o.state {
 		case mjEntry:
@@ -1633,7 +1630,7 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) Next(ctx context.Context) coldata.Batch {
 				o.builderState.outFinished = false
 			}
 
-			if o.outputReady || o.builderState.outCount == o.outputBatchSize {
+			if o.outputReady || o.builderState.outCount == o.output.Capacity() {
 				if o.builderState.outCount == 0 {
 					// We have already fully emitted the result of the join, so we
 					// transition to "finished" state.
@@ -1659,7 +1656,7 @@ func (o *mergeJoin_JOIN_TYPE_STRINGOp) Next(ctx context.Context) coldata.Batch {
 			}
 			return coldata.ZeroBatch
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unexpected merge joiner state in Next: %v", o.state))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpected merge joiner state in Next: %v", o.state))
 		}
 	}
 }

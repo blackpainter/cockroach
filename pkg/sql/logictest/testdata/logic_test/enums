@@ -1,7 +1,4 @@
-# LogicTest: !3node-tenant(50049)
-
-statement ok
-SET experimental_enable_enums=true;
+# LogicTest: !3node-tenant(49854)
 
 statement ok
 CREATE TYPE t AS ENUM ()
@@ -107,13 +104,13 @@ true true true false true NULL NULL true true false true
 statement ok
 CREATE TYPE farewell AS ENUM ('bye', 'seeya')
 
-statement error pq: unsupported comparison operator: <greeting> = <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> = <farewell>
 SELECT 'hello'::greeting = 'bye'::farewell
 
-statement error pq: unsupported comparison operator: <greeting> < <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> < <farewell>
 SELECT 'hello'::greeting < 'bye'::farewell
 
-statement error pq: unsupported comparison operator: <greeting> <= <farewell>
+statement error pq: invalid comparison between different enum types: <greeting> <= <farewell>
 SELECT 'hello'::greeting <= 'bye'::farewell
 
 query T
@@ -467,6 +464,22 @@ SELECT * FROM enum_default
 ----
 1 hello true
 2 hello true
+
+query T
+SELECT
+  pg_get_expr(d.adbin, d.adrelid)
+FROM
+  pg_attribute AS a
+  LEFT JOIN pg_attrdef AS d ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+  LEFT JOIN pg_type AS t ON a.atttypid = t.oid
+  LEFT JOIN pg_collation AS c ON
+    a.attcollation = c.oid AND a.attcollation != t.typcollation
+WHERE
+  a.attrelid = 'enum_default'::REGCLASS
+  AND NOT a.attisdropped
+  AND attname = 'y'
+----
+'hello'::public.greeting
 
 # Test that enum default values are formatted in human readable ways.
 query TT
@@ -1108,13 +1121,43 @@ local
 statement ok
 ROLLBACK
 
-query TT
+query TTT
 SHOW ENUMS
 ----
-as_bytes   bytes
-dbs        postgres|mysql|spanner|cockroach
-farewell   bye|seeya
-greeting   hello|howdy|hi
-greeting2  hello
-int        Z|S of int
-notbad     dup|DUP
+public as_bytes   bytes
+public dbs        postgres|mysql|spanner|cockroach
+public farewell   bye|seeya
+public greeting   hello|howdy|hi
+public greeting2  hello
+public int        Z|S of int
+public notbad     dup|DUP
+
+query TTT
+SHOW TYPES
+----
+public as_bytes   bytes
+public dbs        postgres|mysql|spanner|cockroach
+public farewell   bye|seeya
+public greeting   hello|howdy|hi
+public greeting2  hello
+public int        Z|S of int
+public notbad     dup|DUP
+
+statement ok
+CREATE SCHEMA uds;
+CREATE TYPE uds.typ AS ENUM ('schema')
+
+query TTT
+SHOW ENUMS
+----
+public as_bytes   bytes
+public dbs        postgres|mysql|spanner|cockroach
+public farewell   bye|seeya
+public greeting   hello|howdy|hi
+public greeting2  hello
+public int        Z|S of int
+public notbad     dup|DUP
+uds    typ        schema
+
+statement error pq: cannot create "fakedb.typ" because the target database or schema does not exist
+CREATE TYPE fakedb.typ AS ENUM ('schema')

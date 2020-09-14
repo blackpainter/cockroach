@@ -12,7 +12,6 @@ package colexec
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"math"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/errors"
 )
 
 type mergeJoinIntersectAllOp struct {
@@ -1941,7 +1941,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -3600,7 +3600,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		} else {
@@ -5241,7 +5241,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -6770,7 +6770,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		}
@@ -8688,7 +8688,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -10347,7 +10347,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		} else {
@@ -11988,7 +11988,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -13517,7 +13517,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		}
@@ -15435,7 +15435,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -17094,7 +17094,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		} else {
@@ -18735,7 +18735,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -20264,7 +20264,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		}
@@ -22182,7 +22182,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -23841,7 +23841,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		} else {
@@ -25482,7 +25482,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			} else {
 
@@ -27011,7 +27011,7 @@ EqLoop:
 						}
 					}
 				default:
-					colexecerror.InternalError(fmt.Sprintf("unhandled type %s", colType))
+					colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", colType))
 				}
 			}
 		}
@@ -27047,7 +27047,6 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 ) {
 	sel := batch.Selection()
 	initialBuilderState := o.builderState.left
-	outputBatchSize := o.outputBatchSize
 	o.unlimitedAllocator.PerformOperation(
 		o.output.ColVecs()[:len(input.sourceTypes)],
 		func() {
@@ -27093,8 +27092,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27155,8 +27154,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27217,8 +27216,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27278,8 +27277,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27336,8 +27335,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27395,8 +27394,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27457,8 +27456,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27519,8 +27518,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27581,8 +27580,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27643,8 +27642,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27678,7 +27677,7 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 								o.builderState.left.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					} else {
 
@@ -27711,8 +27710,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27770,8 +27769,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27829,8 +27828,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27887,8 +27886,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27942,8 +27941,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -27998,8 +27997,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28057,8 +28056,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28116,8 +28115,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28175,8 +28174,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28234,8 +28233,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28266,7 +28265,7 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 								o.builderState.left.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 				} else {
@@ -28300,8 +28299,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28361,8 +28360,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28422,8 +28421,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28482,8 +28481,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28539,8 +28538,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28597,8 +28596,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28658,8 +28657,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28719,8 +28718,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28780,8 +28779,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28841,8 +28840,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28876,7 +28875,7 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 								o.builderState.left.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					} else {
 
@@ -28908,8 +28907,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -28966,8 +28965,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29024,8 +29023,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29081,8 +29080,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29135,8 +29134,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29190,8 +29189,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29248,8 +29247,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29306,8 +29305,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29364,8 +29363,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29422,8 +29421,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 
 										repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 										toAppend := repeatsLeft
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -29454,7 +29453,7 @@ func (o *mergeJoinIntersectAllOp) buildLeftGroupsFromBatch(
 								o.builderState.left.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 				}
@@ -29524,8 +29523,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29588,8 +29587,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29652,8 +29651,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29715,8 +29714,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29775,8 +29774,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29836,8 +29835,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29900,8 +29899,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -29964,8 +29963,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -30028,8 +30027,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -30092,8 +30091,8 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 								srcStartIdx := o.builderState.left.curSrcStartIdx
 								repeatsLeft := leftGroup.numRepeats - o.builderState.left.numRepeatsIdx
 								toAppend := repeatsLeft
-								if outStartIdx+toAppend > o.outputBatchSize {
-									toAppend = o.outputBatchSize - outStartIdx
+								if outStartIdx+toAppend > o.output.Capacity() {
+									toAppend = o.output.Capacity() - outStartIdx
 								}
 
 								if o.builderState.left.setOpLeftSrcIdx == leftGroup.rowEndIdx {
@@ -30143,7 +30142,7 @@ func (o *mergeJoinIntersectAllOp) buildLeftBufferedGroup(
 							}
 						}
 					default:
-						colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+						colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 					}
 					if colIdx == len(input.sourceTypes)-1 {
 						// We have appended some tuples into the output batch from the current
@@ -30203,8 +30202,6 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 ) {
 	initialBuilderState := o.builderState.right
 	sel := batch.Selection()
-	outputBatchSize := o.outputBatchSize
-
 	o.unlimitedAllocator.PerformOperation(
 		o.output.ColVecs()[colOffset:colOffset+len(input.sourceTypes)],
 		func() {
@@ -30241,8 +30238,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30309,8 +30306,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30377,8 +30374,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30444,8 +30441,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30508,8 +30505,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30573,8 +30570,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30641,8 +30638,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30709,8 +30706,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30777,8 +30774,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30845,8 +30842,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30895,7 +30892,7 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 								o.builderState.right.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					} else {
 
@@ -30919,8 +30916,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -30985,8 +30982,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31051,8 +31048,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31116,8 +31113,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31178,8 +31175,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31241,8 +31238,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31307,8 +31304,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31373,8 +31370,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31439,8 +31436,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31505,8 +31502,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31553,7 +31550,7 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 								o.builderState.right.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 				} else {
@@ -31579,8 +31576,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31647,8 +31644,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31715,8 +31712,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31782,8 +31779,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31846,8 +31843,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31911,8 +31908,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -31979,8 +31976,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32047,8 +32044,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32115,8 +32112,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32183,8 +32180,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32233,7 +32230,7 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 								o.builderState.right.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					} else {
 
@@ -32257,8 +32254,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32323,8 +32320,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32389,8 +32386,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32454,8 +32451,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32516,8 +32513,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32579,8 +32576,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32645,8 +32642,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32711,8 +32708,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32777,8 +32774,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32843,8 +32840,8 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 											o.builderState.right.curSrcStartIdx = rightGroup.rowStartIdx
 										}
 										toAppend := rightGroup.rowEndIdx - o.builderState.right.curSrcStartIdx
-										if outStartIdx+toAppend > outputBatchSize {
-											toAppend = outputBatchSize - outStartIdx
+										if outStartIdx+toAppend > o.output.Capacity() {
+											toAppend = o.output.Capacity() - outStartIdx
 										}
 
 										{
@@ -32891,7 +32888,7 @@ func (o *mergeJoinIntersectAllOp) buildRightGroupsFromBatch(
 								o.builderState.right.groupsIdx = zeroMJCPGroupsIdx
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 				}
@@ -32937,8 +32934,8 @@ func (o *mergeJoinIntersectAllOp) buildRightBufferedGroup(
 				batchLength := currentBatch.Length()
 				for batchLength > 0 {
 					toAppend := batchLength - o.builderState.right.curSrcStartIdx
-					if outStartIdx+toAppend > o.outputBatchSize {
-						toAppend = o.outputBatchSize - outStartIdx
+					if outStartIdx+toAppend > o.output.Capacity() {
+						toAppend = o.output.Capacity() - outStartIdx
 					}
 
 					// Loop over every column.
@@ -33229,7 +33226,7 @@ func (o *mergeJoinIntersectAllOp) buildRightBufferedGroup(
 								}
 							}
 						default:
-							colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx].String()))
+							colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx].String()))
 						}
 					}
 					outStartIdx += toAppend
@@ -33344,9 +33341,9 @@ func (o *mergeJoinIntersectAllOp) calculateOutputCount(groups []group) int {
 	for i := 0; i < len(groups); i++ {
 		count += groups[i].toBuild
 		groups[i].toBuild = 0
-		if count > o.outputBatchSize {
-			groups[i].toBuild = count - o.outputBatchSize
-			count = o.outputBatchSize
+		if count > o.output.Capacity() {
+			groups[i].toBuild = count - o.output.Capacity()
+			count = o.output.Capacity()
 			return count
 		}
 	}
@@ -33370,13 +33367,13 @@ func (o *mergeJoinIntersectAllOp) build(ctx context.Context) {
 			o.buildLeftBufferedGroup(ctx, o.builderState.lGroups[0], &o.left, o.proberState.lBufferedGroup, outStartIdx)
 
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unsupported mjBuildFrom %d", o.builderState.buildFrom))
+			colexecerror.InternalError(errors.AssertionFailedf("unsupported mjBuildFrom %d", o.builderState.buildFrom))
 		}
 	}
 }
 
 func (o *mergeJoinIntersectAllOp) Next(ctx context.Context) coldata.Batch {
-	o.output.ResetInternalBatch()
+	o.output, _ = o.unlimitedAllocator.ResetMaybeReallocate(o.outputTypes, o.output, 1 /* minCapacity */)
 	for {
 		switch o.state {
 		case mjEntry:
@@ -33415,7 +33412,7 @@ func (o *mergeJoinIntersectAllOp) Next(ctx context.Context) coldata.Batch {
 				o.builderState.outFinished = false
 			}
 
-			if o.outputReady || o.builderState.outCount == o.outputBatchSize {
+			if o.outputReady || o.builderState.outCount == o.output.Capacity() {
 				if o.builderState.outCount == 0 {
 					// We have already fully emitted the result of the join, so we
 					// transition to "finished" state.
@@ -33441,7 +33438,7 @@ func (o *mergeJoinIntersectAllOp) Next(ctx context.Context) coldata.Batch {
 			}
 			return coldata.ZeroBatch
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unexpected merge joiner state in Next: %v", o.state))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpected merge joiner state in Next: %v", o.state))
 		}
 	}
 }

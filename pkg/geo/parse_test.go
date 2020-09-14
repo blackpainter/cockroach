@@ -11,9 +11,11 @@
 package geo
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
+	"github.com/pierrre/geohash"
 	"github.com/stretchr/testify/require"
 )
 
@@ -238,17 +240,34 @@ func TestParseEWKT(t *testing.T) {
 			require.Equal(t, tc.expected, ret)
 		})
 	}
+
+	errorTestCases := []struct {
+		wkt         geopb.EWKT
+		expectedErr string
+	}{
+		{"POINT Z (1 2 3)", "unimplemented: dimension XYZ is not currently supported"},
+		// GEOS assumes all M coordinates as Z coordinates, so the error message is not great here.
+		{"POINT M (1 2 3)", "unimplemented: dimension XYZ is not currently supported"},
+		{"POINT ZM (1 2 3 4)", "unimplemented: dimension XYZ is not currently supported"},
+	}
+	for _, tc := range errorTestCases {
+		t.Run(string(tc.wkt), func(t *testing.T) {
+			_, err := parseEWKT(geopb.SpatialObjectType_GeometryType, tc.wkt, 0, false)
+			require.Error(t, err)
+			require.EqualError(t, err, tc.expectedErr)
+		})
+	}
 }
 
 func TestParseGeometry(t *testing.T) {
 	testCases := []struct {
 		str         string
-		expected    *Geometry
+		expected    Geometry
 		expectedErr string
 	}{
 		{
 			"0101000000000000000000F03F000000000000F03F",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -261,7 +280,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"0101000020E6100000000000000000F03F000000000000F03F",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -274,7 +293,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"0101000020FFFFFFFF000000000000f03f000000000000f03f",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -287,7 +306,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"POINT(1.0 1.0)",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -300,7 +319,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"SRID=4004;POINT(1.0 1.0)",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -313,7 +332,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"SRid=4004;POINT(1.0 1.0)",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -326,7 +345,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f",
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -339,7 +358,7 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			`{ "type": "Point", "coordinates": [1.0, 1.0] }`,
-			&Geometry{
+			Geometry{
 				spatialObject: geopb.SpatialObject{
 					Type:        geopb.SpatialObjectType_GeometryType,
 					EWKB:        []byte("\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -352,12 +371,12 @@ func TestParseGeometry(t *testing.T) {
 		},
 		{
 			"invalid",
-			nil,
+			Geometry{},
 			"geos error: ParseException: Unknown type: 'INVALID'",
 		},
 		{
 			"",
-			nil,
+			Geometry{},
 			"geo: parsing empty string to geo type",
 		},
 	}
@@ -379,13 +398,13 @@ func TestParseGeometry(t *testing.T) {
 func TestParseGeography(t *testing.T) {
 	testCases := []struct {
 		str         string
-		expected    *Geography
+		expected    Geography
 		expectedErr string
 	}{
 		{
 			// Even forcing an SRID to 0 using EWKB will make it 4326.
 			"0101000000000000000000F03F000000000000F03F",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -403,7 +422,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"0101000020E6100000000000000000F03F000000000000F03F",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -421,7 +440,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"0101000020FFFFFFFF000000000000f03f000000000000f03f",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -439,7 +458,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"0101000020A40F0000000000000000F03F000000000000F03F",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -457,7 +476,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"POINT(1.0 1.0)",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -476,7 +495,7 @@ func TestParseGeography(t *testing.T) {
 		{
 			// Even forcing an SRID to 0 using WKT will make it 4326.
 			"SRID=0;POINT(1.0 1.0)",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -494,7 +513,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"SRID=4004;POINT(1.0 1.0)",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -512,7 +531,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -530,7 +549,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f",
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xA4\x0F\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -548,7 +567,7 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			`{ "type": "Point", "coordinates": [1.0, 1.0] }`,
-			&Geography{
+			Geography{
 				spatialObject: geopb.SpatialObject{
 					Type:      geopb.SpatialObjectType_GeographyType,
 					EWKB:      []byte("\x01\x01\x00\x00\x20\xe6\x10\x00\x00\x00\x00\x00\x00\x00\x00\xf0\x3f\x00\x00\x00\x00\x00\x00\xf0\x3f"),
@@ -566,12 +585,12 @@ func TestParseGeography(t *testing.T) {
 		},
 		{
 			"invalid",
-			nil,
+			Geography{},
 			"geos error: ParseException: Unknown type: 'INVALID'",
 		},
 		{
 			"",
-			nil,
+			Geography{},
 			"geo: parsing empty string to geo type",
 		},
 	}
@@ -586,6 +605,86 @@ func TestParseGeography(t *testing.T) {
 				require.Equal(t, tc.expected, g)
 				require.Equal(t, tc.expected.SRID(), g.spatialObject.SRID)
 			}
+		})
+	}
+}
+
+func TestParseHash(t *testing.T) {
+	testCases := []struct {
+		h        string
+		p        int
+		expected geohash.Box
+	}{
+		{"123", 2, geohash.Box{
+			Lat: geohash.Range{
+				Min: -90,
+				Max: -84.375,
+			},
+			Lon: geohash.Range{
+				Min: -123.75,
+				Max: -112.5,
+			},
+		}},
+		{"123", 3, geohash.Box{
+			Lat: geohash.Range{
+				Min: -88.59375,
+				Max: -87.1875,
+			},
+			Lon: geohash.Range{
+				Min: -122.34375,
+				Max: -120.9375,
+			},
+		}},
+		{"123", 4, geohash.Box{
+			Lat: geohash.Range{
+				Min: -88.59375,
+				Max: -87.1875,
+			},
+			Lon: geohash.Range{
+				Min: -122.34375,
+				Max: -120.9375,
+			},
+		}},
+		{"123", -1, geohash.Box{
+			Lat: geohash.Range{
+				Min: -88.59375,
+				Max: -87.1875,
+			},
+			Lon: geohash.Range{
+				Min: -122.34375,
+				Max: -120.9375,
+			},
+		}},
+	}
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%s[:%d]", tc.h, tc.p), func(t *testing.T) {
+			ret, err := parseGeoHash(tc.h, tc.p)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, ret)
+		})
+	}
+
+	errorCases := []struct {
+		h   string
+		p   int
+		err string
+	}{
+		{
+			"",
+			10,
+			"length of GeoHash must be greater than 0",
+		},
+		{
+			"-",
+			10,
+			`geohash decode '-': invalid character at index 0`,
+		},
+	}
+	for _, tc := range errorCases {
+		t.Run(fmt.Sprintf("%s[:%d]", tc.h, tc.p), func(t *testing.T) {
+			_, err := parseGeoHash(tc.h, tc.p)
+			require.Error(t, err)
+			require.EqualError(t, err, tc.err)
 		})
 	}
 }

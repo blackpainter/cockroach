@@ -35,8 +35,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -49,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 )
 
 var errRenewLease = errors.New("renew lease on id")
@@ -466,7 +468,7 @@ func (m *Manager) PublishMultiple(
 		case err == nil || errors.Is(err, ErrDidntUpdateDescriptor):
 			immutDescs := make(map[descpb.ID]catalog.Descriptor)
 			for id, desc := range descs {
-				immutDescs[id] = desc.Immutable()
+				immutDescs[id] = desc.ImmutableCopy()
 			}
 			return immutDescs, nil
 		case errors.Is(err, errLeaseVersionChanged):
@@ -549,7 +551,7 @@ func CountLeases(
 		strings.Join(whereClauses, " OR ")
 	values, err := executor.QueryRowEx(
 		ctx, "count-leases", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		stmt, at.GoTime(),
 	)
 	if err != nil {
@@ -1353,7 +1355,7 @@ func (c *nameCache) get(
 	defer desc.mu.Unlock()
 
 	if !NameMatchesDescriptor(desc, parentID, parentSchemaID, name) {
-		panic(errors.AssertionFailedf("Out of sync entry in the name cache. "+
+		panic(errors.AssertionFailedf("out of sync entry in the name cache. "+
 			"Cache entry: (%d, %d, %q) -> %d. Lease: (%d, %d, %q).",
 			parentID, parentSchemaID, name,
 			desc.GetID(),
@@ -1633,7 +1635,7 @@ func (m *Manager) AcquireByName(
 			if err := m.Release(desc); err != nil {
 				log.Warningf(ctx, "error releasing lease: %s", err)
 			}
-			return nil, hlc.Timestamp{}, sqlbase.ErrDescriptorNotFound
+			return nil, hlc.Timestamp{}, catalog.ErrDescriptorNotFound
 		}
 	}
 	return desc, expiration, nil
@@ -1641,7 +1643,7 @@ func (m *Manager) AcquireByName(
 
 // resolveName resolves a descriptor name to a descriptor ID at a particular
 // timestamp by looking in the database. If the mapping is not found,
-// sqlbase.ErrDescriptorNotFound is returned.
+// catalog.ErrDescriptorNotFound is returned.
 func (m *Manager) resolveName(
 	ctx context.Context,
 	timestamp hlc.Timestamp,
@@ -1674,7 +1676,7 @@ func (m *Manager) resolveName(
 		return id, err
 	}
 	if id == descpb.InvalidID {
-		return id, sqlbase.ErrDescriptorNotFound
+		return id, catalog.ErrDescriptorNotFound
 	}
 	return id, nil
 }
@@ -1779,7 +1781,7 @@ func (m *Manager) isDraining() bool {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (m *Manager) SetDraining(drain bool, reporter func(int, string)) {
+func (m *Manager) SetDraining(drain bool, reporter func(int, redact.SafeString)) {
 	m.draining.Store(drain)
 	if !drain {
 		return
@@ -1847,8 +1849,8 @@ func (m *Manager) refreshLeases(
 					}
 				}
 
-				id, version, name, dropped, offline := sqlbase.GetDescriptorMetadata(desc)
-				goingOffline := offline || dropped
+				id, version, name, state := descpb.GetDescriptorMetadata(desc)
+				goingOffline := state == descpb.DescriptorState_DROP || state == descpb.DescriptorState_OFFLINE
 				// Try to refresh the lease to one >= this version.
 				log.VEventf(ctx, 2, "purging old version of descriptor %d@%d (offline %v)",
 					id, version, goingOffline)
@@ -1931,7 +1933,7 @@ func (m *Manager) watchForGossipUpdates(
 	}
 
 	s.RunWorker(ctx, func(ctx context.Context) {
-		descKeyPrefix := m.storage.codec.TablePrefix(uint32(sqlbase.DescriptorTable.ID))
+		descKeyPrefix := m.storage.codec.TablePrefix(uint32(systemschema.DescriptorTable.ID))
 		// TODO(ajwerner): Add a mechanism to unregister this channel upon
 		// return. NB: this call is allowed to bypass OptionalGossip because
 		// we'll never get here after VersionRangefeedLeases.
@@ -1973,7 +1975,7 @@ func (m *Manager) watchForRangefeedUpdates(
 			Closer:         s.ShouldQuiesce(),
 		}); r.Next(); i++ {
 			ts := m.getResolvedTimestamp()
-			descKeyPrefix := m.storage.codec.TablePrefix(uint32(sqlbase.DescriptorTable.ID))
+			descKeyPrefix := m.storage.codec.TablePrefix(uint32(systemschema.DescriptorTable.ID))
 			span := roachpb.Span{
 				Key:    descKeyPrefix,
 				EndKey: descKeyPrefix.PrefixEnd(),
@@ -2017,8 +2019,8 @@ func (m *Manager) watchForRangefeedUpdates(
 		if descriptor.Union == nil {
 			return
 		}
-		sqlbase.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, ev.Value.Timestamp)
-		id, version, name, _, _ := sqlbase.GetDescriptorMetadata(&descriptor)
+		descpb.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, ev.Value.Timestamp)
+		id, version, name, _ := descpb.GetDescriptorMetadata(&descriptor)
 		if log.V(2) {
 			log.Infof(ctx, "%s: refreshing lease on descriptor: %d (%s), version: %d",
 				ev.Key, id, name, version)
@@ -2076,8 +2078,8 @@ func (m *Manager) handleUpdatedSystemCfg(
 		if descriptor.Union == nil {
 			return
 		}
-		sqlbase.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, kv.Value.Timestamp)
-		id, version, name, _, _ := sqlbase.GetDescriptorMetadata(&descriptor)
+		descpb.MaybeSetDescriptorModificationTimeFromMVCCTimestamp(ctx, &descriptor, kv.Value.Timestamp)
+		id, version, name, _ := descpb.GetDescriptorMetadata(&descriptor)
 		if log.V(2) {
 			log.Infof(ctx, "%s: refreshing lease on descriptor: %d (%s), version: %d",
 				kv.Key, id, name, version)

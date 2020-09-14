@@ -13,7 +13,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/errors"
 )
 
@@ -24,6 +24,7 @@ const (
 	tableEventTypeAddColumnNoBackfill
 	tableEventTypeAddColumnWithBackfill
 	tableEventTypeDropColumn
+	tableEventTruncate
 )
 
 var (
@@ -55,6 +56,8 @@ func classifyTableEvent(e TableEvent) tableEventType {
 		return tableEventTypeAddColumnNoBackfill
 	case hasNewColumnDropBackfillMutation(e):
 		return tableEventTypeDropColumn
+	case tableTruncated(e):
+		return tableEventTruncate
 	default:
 		return tableEventTypeUnknown
 	}
@@ -66,6 +69,10 @@ type tableEventFilter map[tableEventType]bool
 
 func (b tableEventFilter) shouldFilter(ctx context.Context, e TableEvent) (bool, error) {
 	et := classifyTableEvent(e)
+	// Truncation events are not ignored and return an error.
+	if et == tableEventTruncate {
+		return false, errors.Errorf(`"%s" was truncated`, e.Before.Name)
+	}
 	shouldFilter, ok := b[et]
 	if !ok {
 		return false, errors.AssertionFailedf("policy does not specify how to handle event type %v", et)
@@ -79,7 +86,7 @@ func hasNewColumnDropBackfillMutation(e TableEvent) (res bool) {
 	return !dropMutationExists(e.Before) && dropMutationExists(e.After)
 }
 
-func dropMutationExists(desc *sqlbase.ImmutableTableDescriptor) bool {
+func dropMutationExists(desc *tabledesc.Immutable) bool {
 	for _, m := range desc.Mutations {
 		if m.Direction == descpb.DescriptorMutation_DROP &&
 			m.State == descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY {
@@ -99,4 +106,20 @@ func newColumnBackfillComplete(e TableEvent) (res bool) {
 func newColumnNoBackfill(e TableEvent) (res bool) {
 	return len(e.Before.Columns) < len(e.After.Columns) &&
 		!e.Before.HasColumnBackfillMutation()
+}
+
+func pkChangeMutationExists(desc *tabledesc.Immutable) bool {
+	for _, m := range desc.Mutations {
+		if m.Direction == descpb.DescriptorMutation_ADD && m.GetPrimaryKeySwap() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func tableTruncated(e TableEvent) bool {
+	// A table was truncated if the primary index has changed, but an ALTER
+	// PRIMARY KEY statement was not performed. TRUNCATE operates by creating
+	// a new set of indexes for the table, including a new primary index.
+	return e.Before.PrimaryIndex.ID != e.After.PrimaryIndex.ID && !pkChangeMutationExists(e.Before)
 }

@@ -38,19 +38,16 @@ default_transaction_isolation                  serializable
 default_transaction_priority                   normal
 default_transaction_read_only                  off
 disable_partially_distributed_plans            off
+disallow_full_table_scans                      off
 distsql                                        off
 enable_experimental_alter_column_type_general  off
 enable_implicit_select_for_update              on
 enable_insert_fast_path                        on
-enable_interleaved_joins                       on
 enable_seqscan                                 on
 enable_zigzag_join                             on
 experimental_distsql_planning                  off
-experimental_enable_enums                      off
 experimental_enable_hash_sharded_indexes       off
 experimental_enable_temp_tables                off
-experimental_enable_user_defined_schemas       off
-experimental_partial_indexes                   off
 extra_float_digits                             0
 force_savepoint_restart                        off
 foreign_key_cascades_limit                     10000
@@ -65,6 +62,7 @@ max_index_keys                                 32
 node_id                                        1
 optimizer_use_histograms                       on
 optimizer_use_multicol_stats                   on
+prefer_lookup_joins_for_fks                    off
 reorder_joins_limit                            8
 require_explicit_primary_keys                  off
 results_buffer_size                            16384
@@ -218,6 +216,7 @@ public       statement_bundle_chunks          table  NULL
 public       statement_diagnostics_requests   table  NULL
 public       statement_diagnostics            table  NULL
 public       scheduled_jobs                   table  NULL
+public       sqlliveness                      table  NULL
 
 query TTTTT colnames,rowsort
 SELECT * FROM [SHOW TABLES FROM system WITH COMMENT]
@@ -251,6 +250,7 @@ public       statement_bundle_chunks          table  NULL                 ·
 public       statement_diagnostics_requests   table  NULL                 ·
 public       statement_diagnostics            table  NULL                 ·
 public       scheduled_jobs                   table  NULL                 ·
+public       sqlliveness                      table  NULL                 ·
 
 query ITTT colnames
 SELECT node_id, user_name, application_name, active_queries
@@ -341,10 +341,10 @@ v           CREATE VIEW public.v (id) AS SELECT id FROM system.public.descriptor
 query TTT colnames
 SELECT * FROM [SHOW USERS] ORDER BY 1
 ----
-username  options     member_of
-admin     CREATEROLE  {}
-root      CREATEROLE  {admin}
-testuser  ·           {}
+username  options  member_of
+admin     ·        {}
+root      ·        {admin}
+testuser  ·        {}
 
 
 query TTTI colnames

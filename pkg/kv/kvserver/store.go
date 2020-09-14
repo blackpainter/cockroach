@@ -40,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tscache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnrecovery"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
@@ -70,6 +71,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/google/btree"
 	"go.etcd.io/etcd/raft"
 	"golang.org/x/time/rate"
@@ -132,6 +134,21 @@ var concurrentRangefeedItersLimit = settings.RegisterPositiveIntSetting(
 	64,
 )
 
+// Minimum time interval between system config updates which will lead to
+// enqueuing replicas.
+var queueAdditionOnSystemConfigUpdateRate = settings.RegisterNonNegativeFloatSetting(
+	"kv.store.system_config_update.queue_add_rate",
+	"the rate (per second) at which the store will add all replicas to the split and merge queue due to system config gossip",
+	.5)
+
+// Minimum time interval between system config updates which will lead to
+// enqueuing replicas. The default is relatively high to deal with startup
+// scenarios.
+var queueAdditionOnSystemConfigUpdateBurst = settings.RegisterNonNegativeIntSetting(
+	"kv.store.system_config_update.queue_add_burst",
+	"the burst rate at which the store will add all replicas to the split and merge queue due to system config gossip",
+	32)
+
 // raftLeadershipTransferTimeout limits the amount of time a drain command
 // waits for lease transfers.
 var raftLeadershipTransferWait = func() *settings.DurationSetting {
@@ -181,7 +198,6 @@ func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 		CoalescedHeartbeatsInterval: 50 * time.Millisecond,
 		ScanInterval:                10 * time.Minute,
 		HistogramWindowInterval:     metric.TestSampleInterval,
-		EnableEpochRangeLeases:      true,
 		ClosedTimestamp:             container.NoopContainer(),
 		ProtectedTimestampCache:     protectedts.EmptyCache(clock),
 	}
@@ -607,7 +623,11 @@ type Store struct {
 		droppedPlaceholders int32
 	}
 
-	computeInitialMetrics sync.Once
+	// tenantRateLimiters manages tenantrate.Limiters
+	tenantRateLimiters *tenantrate.LimiterFactory
+
+	computeInitialMetrics              sync.Once
+	systemConfigUpdateQueueRateLimiter *quotapool.RateLimiter
 }
 
 var _ kv.Sender = &Store{}
@@ -698,9 +718,6 @@ type StoreConfig struct {
 
 	// HistogramWindowInterval is (server.Config).HistogramWindowInterval
 	HistogramWindowInterval time.Duration
-
-	// EnableEpochRangeLeases controls whether epoch-based range leases are used.
-	EnableEpochRangeLeases bool
 
 	// GossipWhenCapacityDeltaExceedsFraction specifies the fraction from the last
 	// gossiped store capacity values which need be exceeded before the store will
@@ -902,6 +919,23 @@ func NewStore(
 			int(concurrentRangefeedItersLimit.Get(&cfg.Settings.SV)))
 	})
 
+	s.tenantRateLimiters = tenantrate.NewLimiterFactory(cfg.Settings, &cfg.TestingKnobs.TenantRateKnobs)
+	s.metrics.registry.AddMetricStruct(s.tenantRateLimiters.Metrics())
+
+	s.systemConfigUpdateQueueRateLimiter = quotapool.NewRateLimiter(
+		"SystemConfigUpdateQueue",
+		quotapool.Limit(queueAdditionOnSystemConfigUpdateRate.Get(&cfg.Settings.SV)),
+		queueAdditionOnSystemConfigUpdateBurst.Get(&cfg.Settings.SV))
+	updateSystemConfigUpdateQueueLimits := func() {
+		s.systemConfigUpdateQueueRateLimiter.UpdateLimit(
+			quotapool.Limit(queueAdditionOnSystemConfigUpdateRate.Get(&cfg.Settings.SV)),
+			queueAdditionOnSystemConfigUpdateBurst.Get(&cfg.Settings.SV))
+	}
+	queueAdditionOnSystemConfigUpdateRate.SetOnChange(&cfg.Settings.SV,
+		updateSystemConfigUpdateQueueLimits)
+	queueAdditionOnSystemConfigUpdateBurst.SetOnChange(&cfg.Settings.SV,
+		updateSystemConfigUpdateQueueLimits)
+
 	if s.cfg.Gossip != nil {
 		// Add range scanner and configure with queues.
 		s.scanner = newReplicaScanner(
@@ -967,7 +1001,12 @@ func NewStore(
 
 // String formats a store for debug output.
 func (s *Store) String() string {
-	return fmt.Sprintf("[n%d,s%d]", s.Ident.NodeID, s.Ident.StoreID)
+	return redact.StringWithoutMarkers(s)
+}
+
+// SafeFormat implements the redact.SafeFormatter interface.
+func (s *Store) SafeFormat(w redact.SafePrinter, _ rune) {
+	w.Printf("[n%d,s%d]", s.Ident.NodeID, s.Ident.StoreID)
 }
 
 // ClusterSettings returns the node's ClusterSettings.
@@ -989,7 +1028,7 @@ func (s *Store) AnnotateCtx(ctx context.Context) context.Context {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (s *Store) SetDraining(drain bool, reporter func(int, string)) {
+func (s *Store) SetDraining(drain bool, reporter func(int, redact.SafeString)) {
 	s.draining.Store(drain)
 	if !drain {
 		newStoreReplicaVisitor(s).Visit(func(r *Replica) bool {
@@ -1616,7 +1655,7 @@ func (s *Store) startGossip() {
 	gossipFns := []struct {
 		key         roachpb.Key
 		fn          func(context.Context, *Replica) error
-		description string
+		description redact.SafeString
 		interval    time.Duration
 	}{
 		{
@@ -1823,6 +1862,7 @@ func (s *Store) systemGossipUpdate(sysCfg *config.SystemConfig) {
 	// For every range, update its zone config and check if it needs to
 	// be split or merged.
 	now := s.cfg.Clock.Now()
+	shouldQueue := s.systemConfigUpdateQueueRateLimiter.AdmitN(1)
 	newStoreReplicaVisitor(s).Visit(func(repl *Replica) bool {
 		key := repl.Desc().StartKey
 		zone, err := sysCfg.GetZoneConfigForKey(key)
@@ -1833,12 +1873,14 @@ func (s *Store) systemGossipUpdate(sysCfg *config.SystemConfig) {
 			zone = s.cfg.DefaultZoneConfig
 		}
 		repl.SetZoneConfig(zone)
-		s.splitQueue.Async(ctx, "gossip update", true /* wait */, func(ctx context.Context, h queueHelper) {
-			h.MaybeAdd(ctx, repl, now)
-		})
-		s.mergeQueue.Async(ctx, "gossip update", true /* wait */, func(ctx context.Context, h queueHelper) {
-			h.MaybeAdd(ctx, repl, now)
-		})
+		if shouldQueue {
+			s.splitQueue.Async(ctx, "gossip update", true /* wait */, func(ctx context.Context, h queueHelper) {
+				h.MaybeAdd(ctx, repl, now)
+			})
+			s.mergeQueue.Async(ctx, "gossip update", true /* wait */, func(ctx context.Context, h queueHelper) {
+				h.MaybeAdd(ctx, repl, now)
+			})
+		}
 		return true // more
 	})
 }
@@ -1965,6 +2007,16 @@ func (s *Store) VisitReplicas(visitor func(*Replica) (wantMore bool)) {
 	v.Visit(visitor)
 }
 
+// IterationOrder specifies the order in which replicas will be iterated through
+// by VisitReplicasByKey.
+type IterationOrder int
+
+// Ordering options for VisitReplicasByKey.
+const (
+	AscendingKeyOrder  = IterationOrder(-1)
+	DescendingKeyOrder = IterationOrder(1)
+)
+
 // VisitReplicasByKey invokes the visitor on all the replicas for ranges that
 // overlap [startKey, endKey), or until the visitor returns false. Replicas are
 // visited in key order. store.mu is held during the visiting.
@@ -1975,6 +2027,7 @@ func (s *Store) VisitReplicas(visitor func(*Replica) (wantMore bool)) {
 func (s *Store) VisitReplicasByKey(
 	ctx context.Context,
 	startKey, endKey roachpb.RKey,
+	order IterationOrder,
 	visitor func(context.Context, KeyRange) (wantMore bool),
 ) {
 	s.mu.RLock()
@@ -1991,10 +2044,28 @@ func (s *Store) VisitReplicasByKey(
 	})
 
 	// Iterate though overlapping replicas.
-	s.mu.replicasByKey.AscendRange(rangeBTreeKey(startKey), rangeBTreeKey(endKey),
-		func(item btree.Item) bool {
-			return visitor(ctx, item.(KeyRange))
-		})
+	if order == AscendingKeyOrder {
+		s.mu.replicasByKey.AscendRange(rangeBTreeKey(startKey), rangeBTreeKey(endKey),
+			func(item btree.Item) bool {
+				return visitor(ctx, item.(KeyRange))
+			})
+	} else {
+		// Note that we can't use DescendRange() because it treats the lower end as
+		// exclusive and the high end as inclusive.
+		s.mu.replicasByKey.DescendLessOrEqual(rangeBTreeKey(endKey),
+			func(item btree.Item) bool {
+				kr := item.(KeyRange)
+				if kr.startKey().Equal(endKey) {
+					// Skip the range starting at endKey.
+					return true
+				}
+				if kr.Desc().EndKey.Compare(startKey) <= 0 {
+					// Stop when we hit a range below startKey.
+					return false
+				}
+				return visitor(ctx, item.(KeyRange))
+			})
+	}
 }
 
 // WriteLastUpTimestamp records the supplied timestamp into the "last up" key

@@ -9,7 +9,7 @@ define Scan {
 
 define Values {
     Rows [][]tree.TypedExpr
-    Columns sqlbase.ResultColumns
+    Columns colinfo.ResultColumns
 }
 
 # Filter applies a filter on the results of the given input node.
@@ -58,7 +58,7 @@ define SerializingProject {
 # modified.
 define Render {
     Input exec.Node
-    Columns sqlbase.ResultColumns
+    Columns colinfo.ResultColumns
     Exprs tree.TypedExprs
     ReqOrdering exec.OutputOrdering
 }
@@ -77,7 +77,7 @@ define Render {
 define ApplyJoin {
     JoinType descpb.JoinType
     Left exec.Node
-    RightColumns sqlbase.ResultColumns
+    RightColumns colinfo.ResultColumns
     OnCond tree.TypedExpr
     PlanRightSideFn exec.ApplyJoinPlanRightSideFn
 }
@@ -111,58 +111,34 @@ define MergeJoin {
     Left exec.Node
     Right exec.Node
     OnCond tree.TypedExpr
-    LeftOrdering sqlbase.ColumnOrdering
-    RightOrdering sqlbase.ColumnOrdering
+    LeftOrdering colinfo.ColumnOrdering
+    RightOrdering colinfo.ColumnOrdering
     ReqOrdering exec.OutputOrdering
     LeftEqColsAreKey bool
     RightEqColsAreKey bool
 }
 
-# InterleavedJoin runs a join between two interleaved tables. One table is the
-# ancestor of the other in the interleaving hierarchy (as per leftIsAncestor).
-#
-# Semantically, the join is identical to a merge-join between these two
-# tables, where the equality columns are all the index column of the ancestor
-# index.
-#
-# The two scans are guaranteed to have the same direction, and to not have
-# any hard limits.
-#
-# Since the interleaved joiner does a single scan for both tables, only the
-# Locking clause for the ancestor is used.
-#
-define InterleavedJoin {
-    JoinType descpb.JoinType
-    LeftTable cat.Table
-    LeftIndex cat.Index
-    LeftParams exec.ScanParams
-    LeftFilter tree.TypedExpr
-    RightTable cat.Table
-    RightIndex cat.Index
-    RightParams exec.ScanParams
-    RightFilter tree.TypedExpr
-    LeftIsAncestor bool
-    OnCond tree.TypedExpr
-    ReqOrdering exec.OutputOrdering
-}
-
 # GroupBy runs an aggregation. A set of aggregations is performed for each group
 # of values on the groupCols.
-#
-# If the input is guaranteed to have an ordering on grouping columns, a
-# "streaming" aggregation is performed (i.e. aggregation happens separately
-# for each distinct set of values on the set of columns in the ordering).
+# A row is produced for each set of distinct values on the group columns. The
+# row contains the values of the grouping columns, followed by one value for
+# each aggregation.
 define GroupBy {
     Input exec.Node
     GroupCols []exec.NodeColumnOrdinal
-    GroupColOrdering sqlbase.ColumnOrdering
+
+    # If set, the input is guaranteed to have this ordering and a "streaming"
+    # aggregation is performed (i.e. aggregation happens separately for each
+    # distinct set of values on the set of columns in the ordering).
+    GroupColOrdering colinfo.ColumnOrdering
     Aggregations []exec.AggInfo
     ReqOrdering exec.OutputOrdering
 }
 
 # ScalarGroupBy runs a scalar aggregation, i.e.  one which performs a set of
 # aggregations on all the input rows (as a single group) and has exactly one
-# result row (even when there are no input rows).
+# result row (even when there are no input rows). The output row has one value
+# for each aggregation.
 define ScalarGroupBy {
     Input exec.Node
     Aggregations []exec.AggInfo
@@ -199,7 +175,7 @@ define SetOp {
 # ordering[:alreadyOrderedPrefix].
 define Sort {
     Input exec.Node
-    Ordering sqlbase.ColumnOrdering
+    Ordering exec.OutputOrdering
     AlreadyOrderedPrefix int
 }
 
@@ -240,6 +216,7 @@ define LookupJoin {
     LookupCols exec.TableColumnOrdinalSet
     OnCond tree.TypedExpr
     ReqOrdering exec.OutputOrdering
+    Locking *tree.LockingItem
 }
 
 # InvertedJoin performs a lookup join into an inverted index.
@@ -325,7 +302,7 @@ define Max1Row {
 define ProjectSet {
     Input exec.Node
     Exprs tree.TypedExprs
-    ZipCols sqlbase.ResultColumns
+    ZipCols colinfo.ResultColumns
     NumColsPerGen []int
 }
 
@@ -348,6 +325,15 @@ define Explain {
     Plan exec.Plan
 }
 
+# ExplainPlan implements EXPLAIN (PLAN).
+#
+# When the operator is created, it creates an ExplainFactory and calls BuildFn
+# to construct the plan against that factory.
+define ExplainPlan {
+    Options *tree.ExplainOptions
+    BuildFn exec.BuildPlanForExplainFn
+}
+
 # ShowTrace implements a SHOW TRACE FOR SESSION statement.
 define ShowTrace {
     Typ tree.ShowTraceType
@@ -362,18 +348,19 @@ define ShowTrace {
 # of columns in the table into which values are inserted. All columns are
 # expected to be present except delete-only mutation columns, since those do not
 # need to participate in an insert operation.
-#
-# If allowAutoCommit is set, the operator is allowed to commit the
-# transaction (if appropriate, i.e. if it is in an implicit transaction).
-# This is false if there are multiple mutations in a statement, or the output
-# of the mutation is processed through side-effecting expressions.
 define Insert {
     Input exec.Node
     Table cat.Table
+    Arbiters cat.IndexOrdinals
     InsertCols exec.TableColumnOrdinalSet
     ReturnCols exec.TableColumnOrdinalSet
     CheckCols exec.CheckOrdinalSet
-    AllowAutoCommit bool
+
+    # If set, the operator will commit the transaction as part of its execution.
+    # This is false when executing inside an explicit transaction, or there are
+    # multiple mutations in a statement, or the output of the mutation is
+    # processed through side-effecting expressions.
+    AutoCommit bool
 }
 
 # InsertFastPath implements a special (but very common) case of insert,
@@ -381,8 +368,7 @@ define Insert {
 #  - the input is Values with at most InsertFastPathMaxRows, and there are no
 #    subqueries;
 #  - there are no other mutations in the statement, and the output of the
-#    insert is not processed through side-effecting expressions (see
-#    allowAutoCommit flag for ConstructInsert);
+#    insert is not processed through side-effecting expressions.
 #  - there are no self-referencing foreign keys;
 #  - all FK checks can be performed using direct lookups into unique indexes.
 #
@@ -396,6 +382,10 @@ define InsertFastPath {
     ReturnCols exec.TableColumnOrdinalSet
     CheckCols exec.CheckOrdinalSet
     FkChecks []exec.InsertFastPathFKCheck
+
+    # If set, the operator will commit the transaction as part of its execution.
+    # This is false when executing inside an explicit transaction.
+    AutoCommit bool
 }
 
 # Update implements an UPDATE statement. The input contains columns that were
@@ -426,8 +416,10 @@ define Update {
     UpdateCols exec.TableColumnOrdinalSet
     ReturnCols exec.TableColumnOrdinalSet
     Checks exec.CheckOrdinalSet
-    Passthrough sqlbase.ResultColumns
-    AllowAutoCommit bool
+    Passthrough colinfo.ResultColumns
+
+    # If set, the operator will commit the transaction as part of its execution.
+    AutoCommit bool
 }
 
 # Upsert implements an INSERT..ON CONFLICT DO UPDATE or UPSERT statement.
@@ -454,21 +446,22 @@ define Update {
 # columns {0, 1, 2} of the table. The next 3 columns contain the existing
 # values of columns {0, 1, 2} of the table. The last column contains the
 # new value for column {1} of the table.
-#
-# If allowAutoCommit is set, the operator is allowed to commit the
-# transaction (if appropriate, i.e. if it is in an implicit transaction).
-# This is false if there are multiple mutations in a statement, or the output
-# of the mutation is processed through side-effecting expressions.
 define Upsert {
     Input exec.Node
     Table cat.Table
+    Arbiters cat.IndexOrdinals
     CanaryCol exec.NodeColumnOrdinal
     InsertCols exec.TableColumnOrdinalSet
     FetchCols exec.TableColumnOrdinalSet
     UpdateCols exec.TableColumnOrdinalSet
     ReturnCols exec.TableColumnOrdinalSet
     Checks exec.CheckOrdinalSet
-    AllowAutoCommit bool
+
+    # If set, the operator will commit the transaction as part of its execution.
+    # This is false when executing inside an explicit transaction, or there are
+    # multiple mutations in a statement, or the output of the mutation is
+    # processed through side-effecting expressions.
+    AutoCommit bool
 }
 
 # Delete implements a DELETE statement. The input contains columns that were
@@ -477,17 +470,17 @@ define Upsert {
 # The fetchCols set contains the ordinal positions of the fetch columns in
 # the target table. The input must contain those columns in the same order
 # as they appear in the table schema.
-#
-# If allowAutoCommit is set, the operator is allowed to commit the
-# transaction (if appropriate, i.e. if it is in an implicit transaction).
-# This is false if there are multiple mutations in a statement, or the output
-# of the mutation is processed through side-effecting expressions.
 define Delete {
     Input exec.Node
     Table cat.Table
     FetchCols exec.TableColumnOrdinalSet
     ReturnCols exec.TableColumnOrdinalSet
-    AllowAutoCommit bool
+
+    # If set, the operator will commit the transaction as part of its execution.
+    # This is false when executing inside an explicit transaction, or there are
+    # multiple mutations in a statement, or the output of the mutation is
+    # processed through side-effecting expressions.
+    AutoCommit bool
 }
 
 # DeleteRange efficiently deletes contiguous rows stored in the given table's
@@ -512,12 +505,23 @@ define DeleteRange {
     Needed exec.TableColumnOrdinalSet
     IndexConstraint *constraint.Constraint
     InterleavedTables []cat.Table
-    MaxReturnedKeys int
-    AllowAutoCommit bool
+
+    # If set, the operator will commit the transaction as part of its execution.
+    # This is false when executing inside an explicit transaction, or there are
+    # multiple mutations in a statement, or the output of the mutation is
+    # processed through side-effecting expressions, or the operation might
+    # process too many rows.
+    AutoCommit bool
 }
 
 # CreateTable implements a CREATE TABLE statement.
 define CreateTable {
+    Schema cat.Schema
+    Ct *tree.CreateTable
+}
+
+# CreateTableAs implements a CREATE TABLE AS statement.
+define CreateTableAs {
     Input exec.Node
     Schema cat.Schema
     Ct *tree.CreateTable
@@ -529,9 +533,10 @@ define CreateView {
     ViewName *cat.DataSourceName
     IfNotExists bool
     Replace bool
-    Temporary bool
+    Persistence tree.Persistence
+    Materialized bool
     ViewQuery string
-    Columns sqlbase.ResultColumns
+    Columns colinfo.ResultColumns
     deps opt.ViewDeps
 }
 

@@ -258,7 +258,15 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					require.NoError(t, err)
 					wg.Add(1)
 					go func(id int) {
-						outbox.Run(ctx, dialer, execinfra.StaticNodeID, flowID, execinfrapb.StreamID(id), cancelFn)
+						outbox.Run(
+							ctx,
+							dialer,
+							execinfra.StaticNodeID,
+							flowID,
+							execinfrapb.StreamID(id),
+							cancelFn,
+							0, /* connectionTimeout */
+						)
 						wg.Done()
 					}(id)
 
@@ -289,7 +297,7 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 						sourceMemAccount := testMemMonitor.MakeBoundAccount()
 						defer sourceMemAccount.Close(ctxRemote)
 						remoteAllocator := colmem.NewAllocator(ctxRemote, &sourceMemAccount, testColumnFactory)
-						batch := remoteAllocator.NewMemBatch(typs)
+						batch := remoteAllocator.NewMemBatchWithMaxCapacity(typs)
 						batch.SetLength(coldata.BatchSize())
 						runOutboxInbox(
 							ctxRemote,
@@ -377,10 +385,11 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 						require.NotNil(t, meta.Err)
 						id, err := strconv.Atoi(meta.Err.Error())
 						require.NoError(t, err)
-						require.False(t, receivedMetaFromID[id])
 						receivedMetaFromID[id] = true
 					}
-					require.Equal(t, streamID, metaCount, fmt.Sprintf("received metadata from Outbox %+v", receivedMetaFromID))
+					for id, received := range receivedMetaFromID {
+						require.True(t, received, "did not receive metadata from Outbox %d", id)
+					}
 				case consumerClosed:
 					materializer.ConsumerClosed()
 				}

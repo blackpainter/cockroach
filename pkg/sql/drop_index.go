@@ -19,13 +19,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
@@ -87,8 +89,8 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		// the mutation list and new version number created by the first
 		// drop need to be visible to the second drop.
 		tableDesc, err := params.p.ResolveMutableTableDescriptor(
-			ctx, index.tn, true /*required*/, tree.ResolveRequireTableDesc)
-		if sqlbase.IsUndefinedRelationError(err) {
+			ctx, index.tn, true /*required*/, tree.ResolveRequireTableOrViewDesc)
+		if sqlerrors.IsUndefinedRelationError(err) {
 			// Somehow the descriptor we had during planning is not there
 			// any more.
 			return errors.NewAssertionErrorWithWrappedErrf(err,
@@ -97,6 +99,10 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		}
 		if err != nil {
 			return err
+		}
+
+		if tableDesc.IsView() && !tableDesc.MaterializedView() {
+			return pgerror.Newf(pgcode.WrongObjectType, "%q is not a table or materialized view", tableDesc.Name)
 		}
 
 		// If we couldn't find the index by name, this is either a legitimate error or
@@ -129,9 +135,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 // dropShardColumnAndConstraint drops the given shard column and its associated check
 // constraint.
 func (n *dropIndexNode) dropShardColumnAndConstraint(
-	params runParams,
-	tableDesc *sqlbase.MutableTableDescriptor,
-	shardColDesc *descpb.ColumnDescriptor,
+	params runParams, tableDesc *tabledesc.Mutable, shardColDesc *descpb.ColumnDescriptor,
 ) error {
 	validChecks := tableDesc.Checks[:0]
 	for _, check := range tableDesc.AllActiveAndInactiveChecks() {
@@ -183,7 +187,7 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 //
 // Assumes that the given index is sharded.
 func (n *dropIndexNode) maybeDropShardColumn(
-	params runParams, tableDesc *sqlbase.MutableTableDescriptor, shardColName string,
+	params runParams, tableDesc *tabledesc.Mutable, shardColName string,
 ) error {
 	shardColDesc, dropped, err := tableDesc.FindColumnByName(tree.Name(shardColName))
 	if err != nil {
@@ -230,7 +234,7 @@ func (p *planner) dropIndexByName(
 	ctx context.Context,
 	tn *tree.TableName,
 	idxName tree.UnrestrictedName,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	ifExists bool,
 	behavior tree.DropBehavior,
 	constraintBehavior dropIndexConstraintBehavior,
@@ -278,8 +282,8 @@ func (p *planner) dropIndexByName(
 					zone.Subzones,
 					false, /* newSubzones */
 				)
-				if sqlbase.IsCCLRequiredError(err) {
-					return sqlbase.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
+				if sqlerrors.IsCCLRequiredError(err) {
+					return sqlerrors.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
 						"because table %q has at least one remaining index or partition with a zone config",
 						tableDesc.Name))
 				}
@@ -501,7 +505,9 @@ func (p *planner) dropIndexByName(
 		return err
 	}
 
-	if err := tableDesc.Validate(ctx, p.txn, p.ExecCfg().Codec); err != nil {
+	if err := tableDesc.Validate(
+		ctx, catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.ExecCfg().Codec),
+	); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID

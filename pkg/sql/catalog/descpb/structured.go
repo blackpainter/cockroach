@@ -37,6 +37,9 @@ func (dir IndexDescriptor_Direction) ToEncodingDirection() (encoding.Direction, 
 // ID is a custom type for {Database,Table}Descriptor IDs.
 type ID tree.ID
 
+// SafeValue implements the redact.SafeValue interface.
+func (ID) SafeValue() {}
+
 // InvalidID is the uninitialised descriptor id.
 const InvalidID ID = 0
 
@@ -68,14 +71,26 @@ const (
 // FamilyID is a custom type for ColumnFamilyDescriptor IDs.
 type FamilyID uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (FamilyID) SafeValue() {}
+
 // IndexID is a custom type for IndexDescriptor IDs.
 type IndexID tree.IndexID
+
+// SafeValue implements the redact.SafeValue interface.
+func (IndexID) SafeValue() {}
 
 // DescriptorVersion is a custom type for TableDescriptor Versions.
 type DescriptorVersion uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (DescriptorVersion) SafeValue() {}
+
 // IndexDescriptorVersion is a custom type for IndexDescriptor Versions.
 type IndexDescriptorVersion uint32
+
+// SafeValue implements the redact.SafeValue interface.
+func (IndexDescriptorVersion) SafeValue() {}
 
 const (
 	// BaseIndexFormatVersion corresponds to the original encoding of secondary indexes that
@@ -89,6 +104,9 @@ const (
 
 // ColumnID is a custom type for ColumnDescriptor IDs.
 type ColumnID tree.ColumnID
+
+// SafeValue implements the redact.SafeValue interface.
+func (ColumnID) SafeValue() {}
 
 // ColumnIDs is a slice of ColumnDescriptor IDs.
 type ColumnIDs []ColumnID
@@ -153,6 +171,9 @@ var _ = SecondaryIndexEncoding
 // MutationID is a custom type for TableDescriptor mutations.
 type MutationID uint32
 
+// SafeValue implements the redact.SafeValue interface.
+func (MutationID) SafeValue() {}
+
 // InvalidMutationID is the uninitialised mutation id.
 const InvalidMutationID MutationID = 0
 
@@ -194,19 +215,24 @@ func (desc *PartitioningDescriptor) PartitionNames() []string {
 	return names
 }
 
+// Public implements the Descriptor interface.
+func (desc *TableDescriptor) Public() bool {
+	return desc.State == DescriptorState_PUBLIC
+}
+
 // Offline returns true if the table is importing.
 func (desc *TableDescriptor) Offline() bool {
-	return desc.State == TableDescriptor_OFFLINE
+	return desc.State == DescriptorState_OFFLINE
 }
 
 // Dropped returns true if the table is being dropped.
 func (desc *TableDescriptor) Dropped() bool {
-	return desc.State == TableDescriptor_DROP
+	return desc.State == DescriptorState_DROP
 }
 
 // Adding returns true if the table is being added.
 func (desc *TableDescriptor) Adding() bool {
-	return desc.State == TableDescriptor_ADD
+	return desc.State == DescriptorState_ADD
 }
 
 // IsTable returns true if the TableDescriptor actually describes a
@@ -219,6 +245,12 @@ func (desc *TableDescriptor) IsTable() bool {
 // View resource rather than a Table.
 func (desc *TableDescriptor) IsView() bool {
 	return desc.ViewQuery != ""
+}
+
+// MaterializedView returns whether or not this TableDescriptor is a
+// MaterializedView.
+func (desc *TableDescriptor) MaterializedView() bool {
+	return desc.IsMaterializedView
 }
 
 // IsAs returns true if the TableDescriptor actually describes
@@ -240,9 +272,12 @@ func (desc *TableDescriptor) IsVirtualTable() bool {
 	return IsVirtualTable(desc.ID)
 }
 
-// Dropped returns true if the type is dropped.
-func (desc *TypeDescriptor) Dropped() bool {
-	return desc.State == TypeDescriptor_DROP
+// Persistence returns the Persistence from the TableDescriptor.
+func (desc *TableDescriptor) Persistence() tree.Persistence {
+	if desc.Temporary {
+		return tree.PersistenceTemporary
+	}
+	return tree.PersistencePermanent
 }
 
 // IsVirtualTable returns true if the TableDescriptor describes a

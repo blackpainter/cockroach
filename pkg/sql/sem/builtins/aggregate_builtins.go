@@ -19,6 +19,9 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/apd/v2"
+	"github.com/cockroachdb/cockroach/pkg/geo"
+	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
+	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -29,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
+	"github.com/twpayne/go-geom"
 )
 
 func initAggregateBuiltins() {
@@ -291,8 +295,7 @@ var aggregates = map[string]builtinDefinition{
 
 	"final_stddev": makePrivate(makeBuiltin(aggProps(),
 		makeAggOverload(
-			[]*types.T{types.Decimal,
-				types.Decimal, types.Int},
+			[]*types.T{types.Decimal, types.Decimal, types.Int},
 			types.Decimal,
 			newDecimalFinalStdDevAggregate,
 			"Calculates the standard deviation from the selected locally-computed squared difference values.",
@@ -356,6 +359,51 @@ var aggregates = map[string]builtinDefinition{
 		makeAggOverload([]*types.T{types.String, types.Any}, types.Jsonb, newJSONObjectAggregate,
 			"Aggregates values as a JSON or JSONB object.", tree.VolatilityStable),
 	),
+
+	"st_makeline": makeBuiltin(
+		tree.FunctionProperties{
+			Class:                   tree.AggregateClass,
+			NullableArgs:            true,
+			AvailableOnPublicSchema: true,
+		},
+		makeAggOverload(
+			[]*types.T{types.Geometry},
+			types.Geometry,
+			func(
+				params []*types.T, evalCtx *tree.EvalContext, arguments tree.Datums,
+			) tree.AggregateFunc {
+				return &stMakeLineAgg{}
+			},
+			infoBuilder{
+				info: "Forms a LineString from Point, MultiPoint or LineStrings. Other shapes will be ignored.",
+			}.String(),
+			tree.VolatilityImmutable,
+		),
+	),
+	"st_extent": makeBuiltin(
+		tree.FunctionProperties{
+			Class:                   tree.AggregateClass,
+			NullableArgs:            true,
+			AvailableOnPublicSchema: true,
+		},
+		makeAggOverload(
+			[]*types.T{types.Geometry},
+			types.Box2D,
+			func(
+				params []*types.T, evalCtx *tree.EvalContext, arguments tree.Datums,
+			) tree.AggregateFunc {
+				return &stExtentAgg{}
+			},
+			infoBuilder{
+				info: "Forms a Box2D that encapsulates all provided geometries.",
+			}.String(),
+			tree.VolatilityImmutable,
+		),
+	),
+	"st_union":      makeSTUnionBuiltin(),
+	"st_memunion":   makeSTUnionBuiltin(),
+	"st_collect":    makeSTCollectBuiltin(),
+	"st_memcollect": makeSTCollectBuiltin(),
 
 	AnyNotNull: makePrivate(makeBuiltin(aggProps(),
 		makeAggOverloadWithReturnType(
@@ -547,6 +595,347 @@ func makeStdDevBuiltin() builtinDefinition {
 	)
 }
 
+func makeSTCollectBuiltin() builtinDefinition {
+	return makeBuiltin(
+		tree.FunctionProperties{
+			Class:                   tree.AggregateClass,
+			NullableArgs:            true,
+			AvailableOnPublicSchema: true,
+		},
+		makeAggOverload(
+			[]*types.T{types.Geometry},
+			types.Geometry,
+			newSTCollectAgg,
+			infoBuilder{
+				info: "Collects geometries into a GeometryCollection or multi-type as appropriate.",
+			}.String(),
+			tree.VolatilityImmutable,
+		),
+	)
+}
+
+func makeSTUnionBuiltin() builtinDefinition {
+	return makeBuiltin(
+		tree.FunctionProperties{
+			Class:                   tree.AggregateClass,
+			NullableArgs:            true,
+			AvailableOnPublicSchema: true,
+		},
+		makeAggOverload(
+			[]*types.T{types.Geometry},
+			types.Geometry,
+			func(
+				params []*types.T, evalCtx *tree.EvalContext, arguments tree.Datums,
+			) tree.AggregateFunc {
+				return &stUnionAgg{}
+			},
+			infoBuilder{
+				info: "Applies a spatial union to the geometries provided.",
+			}.String(),
+			tree.VolatilityImmutable,
+		),
+	)
+}
+
+type stMakeLineAgg struct {
+	flatCoords []float64
+	layout     geom.Layout
+}
+
+// Add implements the AggregateFunc interface.
+func (agg *stMakeLineAgg) Add(
+	_ context.Context, firstArg tree.Datum, otherArgs ...tree.Datum,
+) error {
+	if firstArg == tree.DNull {
+		return nil
+	}
+	geomArg := tree.MustBeDGeometry(firstArg)
+
+	g, err := geomArg.AsGeomT()
+	if err != nil {
+		return err
+	}
+
+	if len(agg.flatCoords) == 0 {
+		agg.layout = g.Layout()
+	} else if agg.layout != g.Layout() {
+		return errors.Newf(
+			"mixed dimensionality not allowed (adding dimension %s to dimension %s)",
+			g.Layout(),
+			agg.layout,
+		)
+	}
+	switch g.(type) {
+	case *geom.Point, *geom.LineString, *geom.MultiPoint:
+		agg.flatCoords = append(agg.flatCoords, g.FlatCoords()...)
+	}
+	return nil
+}
+
+// Result implements the AggregateFunc interface.
+func (agg *stMakeLineAgg) Result() (tree.Datum, error) {
+	if len(agg.flatCoords) == 0 {
+		return tree.DNull, nil
+	}
+	g, err := geo.MakeGeometryFromGeomT(geom.NewLineStringFlat(agg.layout, agg.flatCoords))
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDGeometry(g), nil
+}
+
+// Reset implements the AggregateFunc interface.
+func (agg *stMakeLineAgg) Reset(context.Context) {
+	agg.flatCoords = agg.flatCoords[:0]
+}
+
+// Close implements the AggregateFunc interface.
+func (agg *stMakeLineAgg) Close(context.Context) {}
+
+// Size implements the AggregateFunc interface.
+func (agg *stMakeLineAgg) Size() int64 {
+	return sizeOfSTMakeLineAggregate
+}
+
+type stUnionAgg struct {
+	srid geopb.SRID
+	// TODO(#geo): store the current union object in C memory, to avoid the EWKB round trips.
+	ewkb geopb.EWKB
+	set  bool
+}
+
+// Add implements the AggregateFunc interface.
+func (agg *stUnionAgg) Add(_ context.Context, firstArg tree.Datum, otherArgs ...tree.Datum) error {
+	if firstArg == tree.DNull {
+		return nil
+	}
+	geomArg := tree.MustBeDGeometry(firstArg)
+	if !agg.set {
+		agg.ewkb = geomArg.EWKB()
+		agg.set = true
+		agg.srid = geomArg.SRID()
+		return nil
+	}
+	if agg.srid != geomArg.SRID() {
+		c, err := geo.ParseGeometryFromEWKB(agg.ewkb)
+		if err != nil {
+			return err
+		}
+		return geo.NewMismatchingSRIDsError(geomArg.Geometry.SpatialObject(), c.SpatialObject())
+	}
+	var err error
+	// TODO(#geo):We are allocating a slice for the result each time we
+	// call geos.Union in cStringToSafeGoBytes.
+	// We could change geos.Union to accept the existing slice.
+	agg.ewkb, err = geos.Union(agg.ewkb, geomArg.EWKB())
+	return err
+}
+
+// Result implements the AggregateFunc interface.
+func (agg *stUnionAgg) Result() (tree.Datum, error) {
+	if !agg.set {
+		return tree.DNull, nil
+	}
+	g, err := geo.ParseGeometryFromEWKB(agg.ewkb)
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDGeometry(g), nil
+}
+
+// Reset implements the AggregateFunc interface.
+func (agg *stUnionAgg) Reset(context.Context) {
+	agg.ewkb = nil
+	agg.set = false
+}
+
+// Close implements the AggregateFunc interface.
+func (agg *stUnionAgg) Close(context.Context) {}
+
+// Size implements the AggregateFunc interface.
+func (agg *stUnionAgg) Size() int64 {
+	return sizeOfSTUnionAggregate
+}
+
+type stCollectAgg struct {
+	acc  mon.BoundAccount
+	coll geom.T
+}
+
+func newSTCollectAgg(_ []*types.T, evalCtx *tree.EvalContext, _ tree.Datums) tree.AggregateFunc {
+	return &stCollectAgg{
+		acc: evalCtx.Mon.MakeBoundAccount(),
+	}
+}
+
+// Add implements the AggregateFunc interface.
+func (agg *stCollectAgg) Add(
+	ctx context.Context, firstArg tree.Datum, otherArgs ...tree.Datum,
+) error {
+	if firstArg == tree.DNull {
+		return nil
+	}
+	if err := agg.acc.Grow(ctx, int64(firstArg.Size())); err != nil {
+		return err
+	}
+	geomArg := tree.MustBeDGeometry(firstArg)
+	t, err := geomArg.AsGeomT()
+	if err != nil {
+		return err
+	}
+	if agg.coll != nil && agg.coll.SRID() != t.SRID() {
+		c, err := geo.MakeGeometryFromGeomT(agg.coll)
+		if err != nil {
+			return err
+		}
+		return geo.NewMismatchingSRIDsError(geomArg.Geometry.SpatialObject(), c.SpatialObject())
+	}
+
+	// Fast path for geometry collections
+	if gc, ok := agg.coll.(*geom.GeometryCollection); ok {
+		return gc.Push(t)
+	}
+
+	// Try to append to a multitype, if possible.
+	switch t := t.(type) {
+	case *geom.Point:
+		if agg.coll == nil {
+			agg.coll = geom.NewMultiPoint(t.Layout()).SetSRID(t.SRID())
+		}
+		if multi, ok := agg.coll.(*geom.MultiPoint); ok {
+			return multi.Push(t)
+		}
+	case *geom.LineString:
+		if agg.coll == nil {
+			agg.coll = geom.NewMultiLineString(t.Layout()).SetSRID(t.SRID())
+		}
+		if multi, ok := agg.coll.(*geom.MultiLineString); ok {
+			return multi.Push(t)
+		}
+	case *geom.Polygon:
+		if agg.coll == nil {
+			agg.coll = geom.NewMultiPolygon(t.Layout()).SetSRID(t.SRID())
+		}
+		if multi, ok := agg.coll.(*geom.MultiPolygon); ok {
+			return multi.Push(t)
+		}
+	}
+
+	// At this point, agg.coll is either a multitype incompatible with t, or nil.
+	var gc *geom.GeometryCollection
+	if agg.coll != nil {
+		// Converting the multitype to a collection temporarily doubles the memory usage.
+		usedMem := agg.acc.Used()
+		if err := agg.acc.Grow(ctx, usedMem); err != nil {
+			return err
+		}
+		gc, err = agg.multiToCollection(agg.coll)
+		if err != nil {
+			return err
+		}
+		agg.coll = nil
+		agg.acc.Shrink(ctx, usedMem)
+	} else {
+		gc = geom.NewGeometryCollection().SetSRID(t.SRID())
+	}
+	agg.coll = gc
+	return gc.Push(t)
+}
+
+func (agg *stCollectAgg) multiToCollection(multi geom.T) (*geom.GeometryCollection, error) {
+	gc := geom.NewGeometryCollection().SetSRID(multi.SRID())
+	switch t := multi.(type) {
+	case *geom.MultiPoint:
+		for i := 0; i < t.NumPoints(); i++ {
+			if err := gc.Push(t.Point(i)); err != nil {
+				return nil, err
+			}
+		}
+	case *geom.MultiLineString:
+		for i := 0; i < t.NumLineStrings(); i++ {
+			if err := gc.Push(t.LineString(i)); err != nil {
+				return nil, err
+			}
+		}
+	case *geom.MultiPolygon:
+		for i := 0; i < t.NumPolygons(); i++ {
+			if err := gc.Push(t.Polygon(i)); err != nil {
+				return nil, err
+			}
+		}
+	default:
+		return nil, errors.AssertionFailedf("unexpected geometry type: %T", t)
+	}
+	return gc, nil
+}
+
+// Result implements the AggregateFunc interface.
+func (agg *stCollectAgg) Result() (tree.Datum, error) {
+	if agg.coll == nil {
+		return tree.DNull, nil
+	}
+	g, err := geo.MakeGeometryFromGeomT(agg.coll)
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDGeometry(g), nil
+}
+
+// Reset implements the AggregateFunc interface.
+func (agg *stCollectAgg) Reset(ctx context.Context) {
+	agg.coll = nil
+	agg.acc.Empty(ctx)
+}
+
+// Close implements the AggregateFunc interface.
+func (agg *stCollectAgg) Close(ctx context.Context) {
+	agg.acc.Close(ctx)
+}
+
+// Size implements the AggregateFunc interface.
+func (agg *stCollectAgg) Size() int64 {
+	return sizeOfSTCollectAggregate
+}
+
+type stExtentAgg struct {
+	bbox *geo.CartesianBoundingBox
+}
+
+// Add implements the AggregateFunc interface.
+func (agg *stExtentAgg) Add(_ context.Context, firstArg tree.Datum, otherArgs ...tree.Datum) error {
+	if firstArg == tree.DNull {
+		return nil
+	}
+	geomArg := tree.MustBeDGeometry(firstArg)
+	if geomArg.Empty() {
+		return nil
+	}
+	b := geomArg.CartesianBoundingBox()
+	agg.bbox = agg.bbox.WithPoint(b.LoX, b.LoY).WithPoint(b.HiX, b.HiY)
+	return nil
+}
+
+// Result implements the AggregateFunc interface.
+func (agg *stExtentAgg) Result() (tree.Datum, error) {
+	if agg.bbox == nil {
+		return tree.DNull, nil
+	}
+	return tree.NewDBox2D(*agg.bbox), nil
+}
+
+// Reset implements the AggregateFunc interface.
+func (agg *stExtentAgg) Reset(context.Context) {
+	agg.bbox = nil
+}
+
+// Close implements the AggregateFunc interface.
+func (agg *stExtentAgg) Close(context.Context) {}
+
+// Size implements the AggregateFunc interface.
+func (agg *stExtentAgg) Size() int64 {
+	return sizeOfSTExtentAggregate
+}
+
 func makeVarianceBuiltin() builtinDefinition {
 	return makeBuiltin(aggProps(),
 		makeAggOverload([]*types.T{types.Int}, types.Decimal, newIntVarianceAggregate,
@@ -597,6 +986,9 @@ var _ tree.AggregateFunc = &intBitOrAggregate{}
 var _ tree.AggregateFunc = &bitBitOrAggregate{}
 var _ tree.AggregateFunc = &percentileDiscAggregate{}
 var _ tree.AggregateFunc = &percentileContAggregate{}
+var _ tree.AggregateFunc = &stMakeLineAgg{}
+var _ tree.AggregateFunc = &stUnionAgg{}
+var _ tree.AggregateFunc = &stExtentAgg{}
 
 const sizeOfArrayAggregate = int64(unsafe.Sizeof(arrayAggregate{}))
 const sizeOfAvgAggregate = int64(unsafe.Sizeof(avgAggregate{}))
@@ -635,6 +1027,10 @@ const sizeOfIntBitOrAggregate = int64(unsafe.Sizeof(intBitOrAggregate{}))
 const sizeOfBitBitOrAggregate = int64(unsafe.Sizeof(bitBitOrAggregate{}))
 const sizeOfPercentileDiscAggregate = int64(unsafe.Sizeof(percentileDiscAggregate{}))
 const sizeOfPercentileContAggregate = int64(unsafe.Sizeof(percentileContAggregate{}))
+const sizeOfSTMakeLineAggregate = int64(unsafe.Sizeof(stMakeLineAgg{}))
+const sizeOfSTUnionAggregate = int64(unsafe.Sizeof(stUnionAgg{}))
+const sizeOfSTCollectAggregate = int64(unsafe.Sizeof(stCollectAgg{}))
+const sizeOfSTExtentAggregate = int64(unsafe.Sizeof(stExtentAgg{}))
 
 // singleDatumAggregateBase is a utility struct that helps aggregate builtins
 // that store a single datum internally track their memory usage related to

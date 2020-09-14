@@ -12,9 +12,15 @@ package invertedidx_test
 
 import (
 	"context"
+	"math"
+	"strconv"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/geo"
+	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
+	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedidx"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/norm"
@@ -22,7 +28,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/testutils/testcat"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTryJoinGeoIndex(t *testing.T) {
@@ -34,14 +43,14 @@ func TestTryJoinGeoIndex(t *testing.T) {
 	// Create the input table.
 	if _, err := tc.ExecuteDDL(
 		"CREATE TABLE t1 (geom1 GEOMETRY, geog1 GEOGRAPHY, geom11 GEOMETRY, geog11 GEOGRAPHY, " +
-			"inet1 INET)",
+			"inet1 INET, bbox1 box2d)",
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create the indexed table.
 	if _, err := tc.ExecuteDDL(
-		"CREATE TABLE t2 (geom2 GEOMETRY, geog2 GEOGRAPHY, inet2 INET, " +
+		"CREATE TABLE t2 (geom2 GEOMETRY, geog2 GEOGRAPHY, inet2 INET, bbox2 box2d, " +
 			"INVERTED INDEX (geom2), INVERTED INDEX (geog2))",
 	); err != nil {
 		t.Fatal(err)
@@ -200,6 +209,78 @@ func TestTryJoinGeoIndex(t *testing.T) {
 				"st_coveredby('SRID=4326;POINT(-40.23456 70.456772)'::geography, geog2)) AND " +
 				"st_covers('SRID=4326;POINT(-42.89456 75.938299)'::geography, geog2)",
 		},
+
+		// Bounding box operators.
+		{
+			filters:      "bbox1 ~ geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_covers(bbox1::geometry, geom2)",
+		},
+		{
+			filters:      "geom2 ~ bbox1",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_coveredby(bbox1::geometry, geom2)",
+		},
+		{
+			filters:      "geom1 ~ geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_covers(geom1, geom2)",
+		},
+		{
+			filters:      "geom2 ~ geom1",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_coveredby(geom1, geom2)",
+		},
+		{
+			filters:      "bbox1 && geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_intersects(bbox1::geometry, geom2)",
+		},
+		{
+			filters:      "geom2 && bbox1",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_intersects(bbox1::geometry, geom2)",
+		},
+		{
+			filters:      "geom1 && geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_intersects(geom1, geom2)",
+		},
+		{
+			filters:      "geom2 && geom1",
+			indexOrd:     geomOrd,
+			invertedExpr: "st_intersects(geom1, geom2)",
+		},
+		{
+			filters:  "geom2 && geom1 AND 'BOX(1 2, 3 4)'::box2d ~ geom2",
+			indexOrd: geomOrd,
+			invertedExpr: "st_intersects(geom1, geom2) AND " +
+				"st_covers('BOX(1 2, 3 4)'::box2d::geometry, geom2)",
+		},
+		{
+			// Wrong index ordinal.
+			filters:      "bbox1 ~ geom2",
+			indexOrd:     geogOrd,
+			invertedExpr: "",
+		},
+		{
+			// At least one column from the input is required.
+			filters:      "bbox2 ~ geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "",
+		},
+		{
+			// At least one column from the input is required.
+			filters:      "'BOX(1 2, 3 4)'::box2d ~ geom2",
+			indexOrd:     geomOrd,
+			invertedExpr: "",
+		},
+		{
+			// Wrong types.
+			filters:      "geom1::string ~ geom2::string",
+			indexOrd:     geomOrd,
+			invertedExpr: "",
+		},
 	}
 
 	for _, tc := range testCases {
@@ -318,6 +399,54 @@ func TestTryConstrainGeoIndex(t *testing.T) {
 			indexOrd: geogOrd,
 			ok:       true,
 		},
+
+		// Bounding box operators.
+		{
+			filters:  "'BOX(1 2, 3 4)'::box2d ~ geom",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "geom ~ 'BOX(1 2, 3 4)'::box2d",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "'LINESTRING ( 0 0, 0 2 )'::geometry ~ geom",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "geom ~ 'LINESTRING ( 0 0, 0 2 )'::geometry",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "'BOX(1 2, 3 4)'::box2d && geom",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "geom && 'BOX(1 2, 3 4)'::box2d",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "'LINESTRING ( 0 0, 0 2 )'::geometry && geom",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			filters:  "geom && 'LINESTRING ( 0 0, 0 2 )'::geometry",
+			indexOrd: geomOrd,
+			ok:       true,
+		},
+		{
+			// Wrong index ordinal.
+			filters:  "'BOX(1 2, 3 4)'::box2d ~ geom",
+			indexOrd: geogOrd,
+			ok:       false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -331,7 +460,7 @@ func TestTryConstrainGeoIndex(t *testing.T) {
 		// that is tested elsewhere. This is just testing that we are constraining
 		// the index when we expect to.
 		_, ok := invertedidx.TryConstrainGeoIndex(
-			evalCtx.Context, filters, tab, md.Table(tab).Index(tc.indexOrd),
+			evalCtx.Context, &f, filters, tab, md.Table(tab).Index(tc.indexOrd),
 		)
 		if tc.ok != ok {
 			t.Fatalf("expected %v, got %v", tc.ok, ok)
@@ -373,3 +502,207 @@ func buildFilters(
 	filters = f.CustomFuncs().ConsolidateFilters(filters)
 	return filters, nil
 }
+
+func TestPreFilterer(t *testing.T) {
+	// Test cases do pre-filtering for (geoShapes[i], geoShapes[j]) for all i,
+	// j.
+	geoShapes := []string{
+		"SRID=4326;POINT(0 0)",
+		"SRID=4326;POINT(5 5)",
+		"SRID=4326;LINESTRING(8 8, 9 9)",
+		"SRID=4326;POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))",
+	}
+	testCases := []struct {
+		// The typ, relationship and relationshipParams determine how the
+		// PreFilterer works.
+		typ                *types.T
+		relationship       geoindex.RelationshipType
+		relationshipParams []tree.Datum
+		shapes             []string
+		expected           [][]bool
+		// excludeFromPreFilters excludes shapes at the given indexes from being
+		// used in Bind calls.
+		excludeFromPreFilters []int
+	}{
+		{
+			typ:          types.Geometry,
+			relationship: geoindex.Intersects,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, false, true},
+				{false, false, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:          types.Geometry,
+			relationship: geoindex.Covers,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, false, true},
+				{false, false, true, false},
+				{false, false, false, true},
+			},
+		},
+		{
+			typ:          types.Geometry,
+			relationship: geoindex.CoveredBy,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, false},
+				{false, true, false, false},
+				{false, false, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:                types.Geometry,
+			relationship:       geoindex.DWithin,
+			relationshipParams: []tree.Datum{tree.NewDFloat(3)},
+			shapes:             geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, true, true},
+				{false, true, true, true},
+				{true, true, true, true},
+			},
+		},
+		{
+			typ:                types.Geometry,
+			relationship:       geoindex.DFullyWithin,
+			relationshipParams: []tree.Datum{tree.NewDFloat(3)},
+			shapes:             geoShapes,
+			expected: [][]bool{
+				{true, false, false, false},
+				{false, true, false, false},
+				{false, true, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:          types.Geography,
+			relationship: geoindex.Intersects,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, false, true},
+				{false, false, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:          types.Geography,
+			relationship: geoindex.Covers,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, false, true},
+				{false, false, true, false},
+				{false, false, false, true},
+			},
+		},
+		{
+			typ:          types.Geography,
+			relationship: geoindex.CoveredBy,
+			shapes:       geoShapes,
+			expected: [][]bool{
+				{true, false, false, false},
+				{false, true, false, false},
+				{false, false, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:                types.Geography,
+			relationship:       geoindex.DWithin,
+			relationshipParams: []tree.Datum{tree.NewDFloat(3)},
+			shapes:             geoShapes,
+			expected: [][]bool{
+				{true, false, false, true},
+				{false, true, false, true},
+				{false, false, true, false},
+				{true, true, false, true},
+			},
+		},
+		{
+			typ:                   types.Geography,
+			relationship:          geoindex.DWithin,
+			relationshipParams:    []tree.Datum{tree.NewDFloat(3)},
+			shapes:                geoShapes,
+			excludeFromPreFilters: []int{2},
+			expected: [][]bool{
+				{true, false, true},
+				{false, true, true},
+				{false, false, false},
+				{true, true, true},
+			},
+		},
+	}
+	encodeInv := func(bbox geopb.BoundingBox) invertedexpr.EncInvertedVal {
+		var b []byte
+		b = encoding.EncodeGeoInvertedAscending(b)
+		// Arbitrary cellid
+		b = encoding.EncodeUvarintAscending(b, math.MaxUint32)
+		b = encoding.EncodeGeoInvertedBBox(b, bbox.LoX, bbox.LoY, bbox.HiX, bbox.HiY)
+		return b
+	}
+	for i, tc := range testCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			filterer := invertedidx.NewPreFilterer(tc.typ, tc.relationship, tc.relationshipParams)
+			var toBind []tree.Datum
+			var toPreFilter []invertedexpr.EncInvertedVal
+			includeBind := func(index int) bool {
+				for _, exclude := range tc.excludeFromPreFilters {
+					if exclude == index {
+						return false
+					}
+				}
+				return true
+			}
+			for i, shape := range tc.shapes {
+				switch tc.typ {
+				case types.Geometry:
+					g, err := geo.ParseGeometry(shape)
+					require.NoError(t, err)
+					if includeBind(i) {
+						toBind = append(toBind, tree.NewDGeometry(g))
+					}
+					toPreFilter = append(toPreFilter, encodeInv(*g.BoundingBoxRef()))
+				case types.Geography:
+					g, err := geo.ParseGeography(shape)
+					require.NoError(t, err)
+					if includeBind(i) {
+						toBind = append(toBind, tree.NewDGeography(g))
+					}
+					rect := g.BoundingRect()
+					toPreFilter = append(toPreFilter,
+						encodeInv(geopb.BoundingBox{
+							LoX: rect.Lng.Lo,
+							HiX: rect.Lng.Hi,
+							LoY: rect.Lat.Lo,
+							HiY: rect.Lat.Hi,
+						}))
+				}
+			}
+			var preFilterState []interface{}
+			for _, d := range toBind {
+				preFilterState = append(preFilterState, filterer.Bind(d))
+			}
+			result := make([]bool, len(preFilterState))
+			for i, enc := range toPreFilter {
+				res, err := filterer.PreFilter(enc, preFilterState, result)
+				require.NoError(t, err)
+				expectedRes := false
+				for _, b := range result {
+					expectedRes = expectedRes || b
+				}
+				require.Equal(t, expectedRes, res)
+				require.Equal(t, tc.expected[i], result)
+			}
+		})
+	}
+}
+
+// TODO(sumeer): test for NewGeoDatumsToInvertedExpr, geoDatumsToInvertedExpr.

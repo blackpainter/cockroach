@@ -55,7 +55,7 @@ func TestSpillingQueue(t *testing.T) {
 				dequeuedProbabilityBeforeAllEnqueuesAreDone = 0
 				prefix = "Rewindable/"
 			}
-			numBatches := 1 + rng.Intn(1024)
+			numBatches := 1 + rng.Intn(16)
 			log.Infof(context.Background(), "%sMemoryLimit=%s/DiskQueueCacheMode=%d/AlwaysCompress=%t/NumBatches=%d",
 				prefix, humanizeutil.IBytes(memoryLimit), diskQueueCacheMode, alwaysCompress, numBatches)
 			// Create random input.
@@ -79,14 +79,12 @@ func TestSpillingQueue(t *testing.T) {
 			if rewindable {
 				q = newRewindableSpillingQueue(
 					testAllocator, typs, memoryLimit, queueCfg,
-					colexecbase.NewTestingSemaphore(2), coldata.BatchSize(),
-					testDiskAcc,
+					colexecbase.NewTestingSemaphore(2), testDiskAcc,
 				)
 			} else {
 				q = newSpillingQueue(
 					testAllocator, typs, memoryLimit, queueCfg,
-					colexecbase.NewTestingSemaphore(2), coldata.BatchSize(),
-					testDiskAcc,
+					colexecbase.NewTestingSemaphore(2), testDiskAcc,
 				)
 			}
 

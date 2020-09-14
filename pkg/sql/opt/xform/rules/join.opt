@@ -2,11 +2,10 @@
 # join.opt contains exploration rules for the Join operator.
 # =============================================================================
 
-# ReorderJoins matches the first expression of an inner join group and adds to
-# the memo all valid join orderings that do not introduce cross joins. If the
-# join has join hints or is the result of a previous join reordering, the join
-# tree is not reordered. For more information, see the comment in
-# join_order_builder.go.
+# ReorderJoins matches the first expression of a join group and adds to the memo
+# all valid join orderings that do not introduce cross joins. If the join has
+# join hints or is the result of a previous join reordering, the join tree is
+# not reordered. For more information, see the comment in join_order_builder.go.
 #
 # Citations: [8]
 [ReorderJoins, Explore]
@@ -15,15 +14,6 @@
 )
 =>
 (ReorderJoins)
-
-# CommuteJoin creates a Join with the left and right inputs swapped. This is
-# useful for other rules that convert joins to other operators (like merge
-# join).
-# If any join hints are specified, we keep the order in the query.
-[CommuteJoin, Explore]
-(InnerJoin | FullJoin $left:* $right:* $on:* $private:*)
-=>
-((OpName) $right $left $on (CommuteJoinFlags $private))
 
 # CommuteLeftJoin creates a Join with the left and right inputs swapped.
 # This is symmetric with the CommuteRightJoin normalization rule.
@@ -97,6 +87,165 @@
     (OutputCols $left)
 )
 
+# ConvertSemiToInnerJoin applies in the cases where CommuteSemiJoin does not:
+# when the ON condition is not a simple equality. In this case, we must perform
+# a DisinctOn operation *after* the inner join, followed by a project to remove
+# the right-side columns.
+#
+# Similar to CommuteSemiJoin, this rule allows semi joins to be commuted. This
+# rule is also useful because it allows us to generate lookup joins and
+# inverted lookup joins for cases where the index is not covering.
+[ConvertSemiToInnerJoin, Explore]
+(SemiJoin
+    $left:*
+    $right:*
+    $on:* & ^(IsSimpleEquality $on)
+    $private:* & (NoJoinHints $private)
+)
+=>
+(Project
+    (DistinctOn
+        (InnerJoin
+            $newLeft:(EnsureKey $left)
+            $right
+            $on
+            $private
+        )
+        (MakeAggCols ConstAgg (NonKeyCols $newLeft))
+        (MakeGrouping (KeyCols $newLeft) (EmptyOrdering))
+    )
+    []
+    (OutputCols $left)
+)
+
+# ConvertLeftToInnerJoin converts a left join to an inner join with the same
+# ON condition, and then wraps the expression in another left join with the
+# original left side. In order to avoid computing the left side of the join
+# twice, we create a With expression for the left side, and then reference it
+# with two WithScans. For example (assuming x is the primary key of a):
+#
+#   SELECT a.x, b.y FROM a LEFT JOIN b ON ST_Intersects(a.geom, b.geom);
+#
+# is converted to:
+#
+#   WITH a_buf AS (
+#     SELECT * FROM a
+#   )
+#   SELECT a_buf.x, inr.y FROM a_buf LEFT JOIN (
+#     SELECT * FROM a_buf JOIN b ON ST_Intersects(a_buf.geom, b.geom)
+#   ) AS inr
+#   ON a_buf.x = inr.x;
+#
+# Note that this transformation is not desirable in the general case, but it
+# is useful if there is a possibility of creating an inverted join (such as in
+# the above example). For this reason, we only perform this transformation if
+# CanGenerateInvertedJoin returns true.
+#
+# There is some added complexity due to the need to maintain the same output
+# column IDs. Therefore, the WithScan in the outer left join must retain the
+# original column IDs, but the binding expression of the With and the WithScan
+# in the inner join must have different column IDs. See the ReplaceOutputCols
+# and MakeWithScanUsingCols functions for details about how this works. Only
+# the columns from the outer left side and the inner right side are ultimately
+# projected.
+#
+# TODO(rytaft): This is a temporary solution to support index acceleration of
+# geospatial left joins. Eventually we would like to support index acceleration
+# of left joins directly by adding some extra bookkeeping to the execution
+# operators. See #53576.
+#
+# TODO(rytaft): It is possible that this transformation may be desirable in
+# more cases than just spatial queries. For example, it could enable the use
+# of a lookup join with a non-covering index.
+[ConvertLeftToInnerJoin, Explore]
+(LeftJoin
+    $left:*
+    $right:*
+    $on:* & (CanGenerateInvertedJoin $right $on)
+    $private:* & (NoJoinHints $private)
+)
+=>
+(With
+    $bindingExpr:(ReplaceOutputCols $newLeft:(EnsureKey $left))
+    (Project
+        (LeftJoin
+            $outerLeft:(MakeWithScanUsingCols
+                $id:(AddWithBinding $bindingExpr)
+                (OutputCols $newLeft)
+            )
+            (InnerJoin
+                $innerLeft:(MakeWithScan $id)
+                $right
+                (MapFilterCols
+                    $on
+                    (OutputCols $newLeft)
+                    (OutputCols $innerLeft)
+                )
+                (EmptyJoinPrivate)
+            )
+            (MakeWithScanKeyEqualityFilters
+                $outerLeft
+                $innerLeft
+            )
+            $private
+        )
+        []
+        (OutputCols2 $left $right)
+    )
+    (MakeWithPrivate $id)
+)
+
+# ConvertAntiToLeftJoin converts an anti join to a left join with the same
+# ON condition, wraps the expression in a Select to remove rows that matched
+# the ON condition, and then projects out the left side columns.
+# For example (assuming x is a not-null column in b):
+#
+#   SELECT * FROM a WHERE NOT EXISTS (
+#     SELECT * FROM b WHERE ST_Intersects(a.geom, b.geom)
+#   );
+#
+# is converted to:
+#
+#   SELECT a.* FROM a LEFT JOIN b ON ST_Intersects(a.geom, b.geom)
+#   WHERE b.x IS NULL;
+#
+# Note that this transformation is not desirable in the general case, but it
+# is useful if there is a possibility of creating an inverted join (such as in
+# the above example). For this reason, we only perform this transformation if
+# CanGenerateInvertedJoin returns true.
+#
+# TODO(rytaft): It is possible that this transformation may be desirable in
+# more cases than just spatial queries. For example, it could enable the use
+# of a lookup join with a non-covering index.
+[ConvertAntiToLeftJoin, Explore]
+(AntiJoin
+    $left:*
+    $right:*
+    $on:* & (CanGenerateInvertedJoin $right $on)
+    $private:* & (NoJoinHints $private)
+)
+=>
+(Project
+    (Select
+        (LeftJoin
+            $left
+            $newRight:(EnsureNotNullColFromFilteredScan $right)
+            $on
+            $private
+        )
+        [
+            (FiltersItem
+                (Is
+                    $variable:(Variable (NotNullCol $newRight))
+                    (Null (TypeOf $variable))
+                )
+            )
+        ]
+    )
+    []
+    (OutputCols $left)
+)
+
 # GenerateMergeJoins creates MergeJoin operators for the join, using the
 # interesting orderings property.
 [GenerateMergeJoins, Explore]
@@ -120,9 +269,11 @@
 # GenerateInvertedJoins creates InvertedJoin operators for all inverted
 # indexes (of the Scan table) which allow it. See the GenerateInvertedJoins
 # custom function for more details.
-# TODO(rytaft): Add support for LeftJoin.
+# TODO(rytaft): Add support for LeftJoin, SemiJoin, and AntiJoin. Currently
+# these are supported by first converting them to InnerJoin using the rules
+# ConvertSemiToInnerJoin, ConvertLeftToInnerJoin, and ConvertAntiToLeftJoin.
 [GenerateInvertedJoins, Explore]
-(InnerJoin | SemiJoin | AntiJoin
+(InnerJoin
     $left:*
     (Scan $scanPrivate:*) &
         (IsCanonicalScan $scanPrivate) &
@@ -135,9 +286,8 @@
 
 # GenerateInvertedJoinsFromSelect is similar to GenerateInvertedJoins, but
 # applies when the input is a Select.
-# TODO(rytaft): Add support for LeftJoin.
 [GenerateInvertedJoinsFromSelect, Explore]
-(InnerJoin | SemiJoin | AntiJoin
+(InnerJoin
     $left:*
     (Select
         (Scan $scanPrivate:*) &

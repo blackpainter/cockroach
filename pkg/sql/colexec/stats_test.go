@@ -34,7 +34,7 @@ func TestNumBatches(t *testing.T) {
 	nBatches := 10
 	noop := NewNoop(makeFiniteChunksSourceWithBatchSize(nBatches, coldata.BatchSize()))
 	vsc := NewVectorizedStatsCollector(
-		noop, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+		noop, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 		timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
 		nil, /* inputStatsCollectors */
 	)
@@ -56,7 +56,7 @@ func TestNumTuples(t *testing.T) {
 	for _, batchSize := range []int{1, 16, 1024} {
 		noop := NewNoop(makeFiniteChunksSourceWithBatchSize(nBatches, batchSize))
 		vsc := NewVectorizedStatsCollector(
-			noop, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			noop, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
@@ -88,7 +88,7 @@ func TestVectorizedStatsCollector(t *testing.T) {
 			timeSource:   timeSource,
 		}
 		leftInput := NewVectorizedStatsCollector(
-			leftSource, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			leftSource, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
@@ -97,7 +97,7 @@ func TestVectorizedStatsCollector(t *testing.T) {
 			timeSource:   timeSource,
 		}
 		rightInput := NewVectorizedStatsCollector(
-			rightSource, 1 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			rightSource, nil /* ioReader */, 1 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
 			nil, /* inputStatsCollectors */
 		)
@@ -118,39 +118,37 @@ func TestVectorizedStatsCollector(t *testing.T) {
 		}
 
 		mjStatsCollector := NewVectorizedStatsCollector(
-			timeAdvancingMergeJoiner, 2 /* id */, execinfrapb.ProcessorIDTagKey, false, /* isStall */
+			timeAdvancingMergeJoiner, nil /* ioReader */, 2 /* id */, execinfrapb.ProcessorIDTagKey,
 			mjInputWatch, nil /* memMonitors */, nil, /* diskMonitors */
 			[]*VectorizedStatsCollector{leftInput, rightInput},
 		)
 
-		// The inputs are identical, so the merge joiner should output nBatches
-		// batches with each having coldata.BatchSize() tuples.
+		// The inputs are identical, so the merge joiner should output
+		// nBatches x coldata.BatchSize() tuples.
 		mjStatsCollector.Init()
-		batchCount := 0
+		batchCount, tupleCount := 0, 0
 		for {
 			b := mjStatsCollector.Next(context.Background())
 			if b.Length() == 0 {
 				break
 			}
-			require.Equal(t, coldata.BatchSize(), b.Length())
 			batchCount++
+			tupleCount += b.Length()
 		}
 		mjStatsCollector.finalizeStats()
 
-		require.Equal(t, nBatches, batchCount)
-		require.Equal(t, nBatches, int(mjStatsCollector.NumBatches))
 		require.Equal(t, nBatches*coldata.BatchSize(), int(mjStatsCollector.NumTuples))
 		// Two inputs are advancing the time source for a total of 2 * nBatches
 		// advances, but these do not count towards merge joiner execution time.
 		// Merge joiner advances the time on its every non-empty batch totaling
-		// nBatches advances that should be accounted for in stats.
-		require.Equal(t, time.Duration(nBatches), mjStatsCollector.Time)
+		// batchCount advances that should be accounted for in stats.
+		require.Equal(t, time.Duration(batchCount), mjStatsCollector.Time)
 	}
 }
 
 func makeFiniteChunksSourceWithBatchSize(nBatches int, batchSize int) colexecbase.Operator {
 	typs := []*types.T{types.Int}
-	batch := testAllocator.NewMemBatchWithSize(typs, batchSize)
+	batch := testAllocator.NewMemBatchWithFixedCapacity(typs, batchSize)
 	vec := batch.ColVec(0).Int64()
 	for i := 0; i < batchSize; i++ {
 		vec[i] = int64(i)

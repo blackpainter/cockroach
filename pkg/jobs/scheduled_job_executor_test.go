@@ -14,11 +14,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,14 +40,19 @@ func (s *statusTrackingExecutor) ExecuteJob(
 }
 
 func (s *statusTrackingExecutor) NotifyJobTermination(
-	_ context.Context,
-	_ *scheduledjobs.JobExecutionConfig,
-	_ scheduledjobs.JobSchedulerEnv,
-	md *JobMetadata,
-	_ *ScheduledJob,
-	_ *kv.Txn,
+	ctx context.Context,
+	jobID int64,
+	jobStatus Status,
+	env scheduledjobs.JobSchedulerEnv,
+	schedule *ScheduledJob,
+	ex sqlutil.InternalExecutor,
+	txn *kv.Txn,
 ) error {
-	s.counts[md.Status]++
+	s.counts[jobStatus]++
+	return nil
+}
+
+func (s *statusTrackingExecutor) Metrics() metric.Struct {
 	return nil
 }
 
@@ -54,23 +60,6 @@ var _ ScheduledJobExecutor = &statusTrackingExecutor{}
 
 func newStatusTrackingExecutor() *statusTrackingExecutor {
 	return &statusTrackingExecutor{counts: make(map[Status]int)}
-}
-
-func TestNotifyJobTerminationExpectsTerminalState(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	for _, s := range []Status{
-		StatusPending, StatusRunning, StatusPaused, StatusReverting,
-		StatusCancelRequested, StatusPauseRequested,
-	} {
-		md := &JobMetadata{
-			ID:     123,
-			Status: s,
-		}
-		require.Error(t, NotifyJobTermination(
-			context.Background(), nil, nil, md, 321, nil))
-	}
 }
 
 func TestScheduledJobExecutorRegistration(t *testing.T) {
@@ -81,7 +70,7 @@ func TestScheduledJobExecutorRegistration(t *testing.T) {
 	instance := newStatusTrackingExecutor()
 	defer registerScopedScheduledJobExecutor(executorName, instance)()
 
-	registered, err := NewScheduledJobExecutor(executorName)
+	registered, err := newScheduledJobExecutor(executorName)
 	require.NoError(t, err)
 	require.Equal(t, instance, registered)
 }
@@ -103,12 +92,8 @@ func TestJobTerminationNotification(t *testing.T) {
 
 	// Pretend it completes multiple runs with terminal statuses.
 	for _, s := range []Status{StatusCanceled, StatusFailed, StatusSucceeded} {
-		md := &JobMetadata{
-			ID:      123,
-			Status:  s,
-			Payload: &jobspb.Payload{},
-		}
-		require.NoError(t, NotifyJobTermination(ctx, h.cfg, h.env, md, schedule.ScheduleID(), nil))
+		require.NoError(t, NotifyJobTermination(
+			ctx, h.env, 123, s, schedule.ScheduleID(), h.cfg.InternalExecutor, nil))
 	}
 
 	// Verify counts.

@@ -24,10 +24,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -36,7 +36,7 @@ import (
 
 func descForTable(
 	t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
-) *sqlbase.ImmutableTableDescriptor {
+) *tabledesc.Mutable {
 	t.Helper()
 	parsed, err := parser.Parse(create)
 	if err != nil {
@@ -54,7 +54,7 @@ func descForTable(
 
 		ts := hlc.Timestamp{WallTime: nanos}
 		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRole)
-		desc, err := sql.MakeSequenceTableDesc(
+		desc, err := sql.NewSequenceTableDesc(
 			name,
 			tree.SequenceOptions{},
 			parent,
@@ -62,13 +62,13 @@ func descForTable(
 			id-1,
 			ts,
 			priv,
-			false, /* temporary */
-			nil,   /* params */
+			tree.PersistencePermanent,
+			nil, /* params */
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fks.resolver[name] = &desc
+		fks.resolver[name] = desc
 	} else {
 		stmt = parsed[0].AST.(*tree.CreateTable)
 	}
@@ -77,10 +77,10 @@ func descForTable(
 	if err != nil {
 		t.Fatalf("could not interpret %q: %v", create, err)
 	}
-	if err := fixDescriptorFKState(table.TableDesc()); err != nil {
+	if err := fixDescriptorFKState(table); err != nil {
 		t.Fatal(err)
 	}
-	return table.Immutable().(*sqlbase.ImmutableTableDescriptor)
+	return table
 }
 
 var testEvalCtx = &tree.EvalContext{

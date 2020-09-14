@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
@@ -21,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 )
 
 // OperatorInitStatus indicates whether Init method has already been called on
@@ -62,7 +62,7 @@ func (n OneInputNode) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return n.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -93,7 +93,7 @@ func (n *twoInputNode) Child(nth int, verbose bool) execinfra.OpNode {
 	case 1:
 		return n.inputTwo
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid idx %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid idx %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }
@@ -139,6 +139,8 @@ type Closers []Closer
 
 // CloseAndLogOnErr closes all Closers and logs the error if the log verbosity
 // is 1 or higher. The given prefix is prepended to the log message.
+// Note: this method should *only* be used when returning an error doesn't make
+// sense.
 func (c Closers) CloseAndLogOnErr(ctx context.Context, prefix string) {
 	prefix += ":"
 	for _, closer := range c {
@@ -146,6 +148,17 @@ func (c Closers) CloseAndLogOnErr(ctx context.Context, prefix string) {
 			log.Infof(ctx, "%s error closing Closer: %v", prefix, err)
 		}
 	}
+}
+
+// Close closes all Closers and returns the last error (if any occurs).
+func (c Closers) Close(ctx context.Context) error {
+	var lastErr error
+	for _, closer := range c {
+		if err := closer.Close(ctx); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
 }
 
 // CallbackCloser is a utility struct that implements the Closer interface by
@@ -284,7 +297,7 @@ var _ colexecbase.Operator = &singleTupleNoInputOperator{}
 // batches on all consecutive calls.
 func NewSingleTupleNoInputOp(allocator *colmem.Allocator) colexecbase.Operator {
 	return &singleTupleNoInputOperator{
-		batch: allocator.NewMemBatchWithSize(nil /* types */, 1 /* size */),
+		batch: allocator.NewMemBatchWithFixedCapacity(nil /* types */, 1 /* size */),
 	}
 }
 
@@ -436,7 +449,7 @@ func NewBatchSchemaSubsetEnforcer(
 func (e *BatchSchemaSubsetEnforcer) Init() {
 	e.input.Init()
 	if e.subsetStartIdx >= e.subsetEndIdx {
-		colexecerror.InternalError("unexpectedly subsetStartIdx is not less than subsetEndIdx")
+		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly subsetStartIdx is not less than subsetEndIdx"))
 	}
 }
 

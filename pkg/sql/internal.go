@@ -20,12 +20,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -209,7 +209,7 @@ func (ie *InternalExecutor) QueryEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) ([]tree.Datums, error) {
@@ -223,10 +223,10 @@ func (ie *InternalExecutor) QueryWithCols(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
-) ([]tree.Datums, sqlbase.ResultColumns, error) {
+) ([]tree.Datums, colinfo.ResultColumns, error) {
 	return ie.queryInternal(ctx, opName, txn, session, stmt, qargs...)
 }
 
@@ -234,10 +234,10 @@ func (ie *InternalExecutor) queryInternal(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	sessionDataOverride sqlbase.InternalExecutorSessionDataOverride,
+	sessionDataOverride sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
-) ([]tree.Datums, sqlbase.ResultColumns, error) {
+) ([]tree.Datums, colinfo.ResultColumns, error) {
 	res, err := ie.execInternal(ctx, opName, txn, sessionDataOverride, stmt, qargs...)
 	if err != nil {
 		return nil, nil, err
@@ -264,7 +264,7 @@ func (ie *InternalExecutor) QueryRowEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (tree.Datums, error) {
@@ -305,7 +305,7 @@ func (ie *InternalExecutor) ExecEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (int, error) {
@@ -319,12 +319,12 @@ func (ie *InternalExecutor) ExecEx(
 type result struct {
 	rows         []tree.Datums
 	rowsAffected int
-	cols         sqlbase.ResultColumns
+	cols         colinfo.ResultColumns
 	err          error
 }
 
 // applyOverrides overrides the respective fields from sd for all the fields set on o.
-func applyOverrides(o sqlbase.InternalExecutorSessionDataOverride, sd *sessiondata.SessionData) {
+func applyOverrides(o sessiondata.InternalExecutorOverride, sd *sessiondata.SessionData) {
 	if o.User != "" {
 		sd.User = o.User
 	}
@@ -341,14 +341,14 @@ func applyOverrides(o sqlbase.InternalExecutorSessionDataOverride, sd *sessionda
 
 func (ie *InternalExecutor) maybeRootSessionDataOverride(
 	opName string,
-) sqlbase.InternalExecutorSessionDataOverride {
+) sessiondata.InternalExecutorOverride {
 	if ie.sessionData == nil {
-		return sqlbase.InternalExecutorSessionDataOverride{
+		return sessiondata.InternalExecutorOverride{
 			User:            security.RootUser,
 			ApplicationName: catconstants.InternalAppNamePrefix + "-" + opName,
 		}
 	}
-	o := sqlbase.InternalExecutorSessionDataOverride{}
+	o := sessiondata.InternalExecutorOverride{}
 	if ie.sessionData.User == "" {
 		o.User = security.RootUser
 	}
@@ -367,7 +367,7 @@ func (ie *InternalExecutor) execInternal(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	sessionDataOverride sqlbase.InternalExecutorSessionDataOverride,
+	sessionDataOverride sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (retRes result, retErr error) {

@@ -40,7 +40,7 @@ SHOW database
 database
 ·
 
-statement error no database specified
+statement error no database or schema specified
 SHOW TABLES
 
 # Verify SHOW TABLES FROM works when there is no current database.
@@ -393,3 +393,15 @@ SHOW enable_seqscan
 ----
 enable_seqscan
 on
+
+statement ok
+BEGIN
+
+statement ok
+SET TRANSACTION NOT DEFERRABLE
+
+statement error pq: unimplemented: DEFERRABLE transactions
+SET TRANSACTION DEFERRABLE
+
+statement ok
+rollback

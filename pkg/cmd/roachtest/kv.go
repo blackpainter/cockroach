@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -192,7 +194,7 @@ func registerKVContention(r *testRegistry) {
 	r.Add(testSpec{
 		Name:       fmt.Sprintf("kv/contention/nodes=%d", nodes),
 		Owner:      OwnerKV,
-		MinVersion: "v19.2.0",
+		MinVersion: "v20.1.0",
 		Cluster:    makeClusterSpec(nodes + 1),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			c.Put(ctx, cockroach, "./cockroach", c.Range(1, nodes))
@@ -348,11 +350,12 @@ func registerKVQuiescenceDead(r *testRegistry) {
 
 func registerKVGracefulDraining(r *testRegistry) {
 	r.Add(testSpec{
-		Skip:    "https://github.com/cockroachdb/cockroach/issues/33501",
 		Name:    "kv/gracefuldraining/nodes=3",
 		Owner:   OwnerKV,
 		Cluster: makeClusterSpec(4),
 		Run: func(ctx context.Context, t *test, c *cluster) {
+			skip.UnderRace(t, "race builds make this test exceed its timeout")
+
 			nodes := c.spec.NodeCount - 1
 			c.Put(ctx, cockroach, "./cockroach", c.Range(1, nodes))
 			c.Put(ctx, workload, "./workload", c.Node(nodes+1))
@@ -463,22 +466,20 @@ func registerKVSplits(r *testRegistry) {
 		quiesce bool
 		splits  int
 		timeout time.Duration
-		skip    string
 	}{
 		// NB: with 500000 splits, this test sometimes fails since it's pushing
 		// far past the number of replicas per node we support, at least if the
 		// ranges start to unquiesce (which can set off a cascade due to resource
 		// exhaustion).
-		{true, 300000, 2 * time.Hour, "https://github.com/cockroachdb/cockroach/issues/50865"},
+		{true, 300000, 2 * time.Hour},
 		// This version of the test prevents range quiescence to trigger the
 		// badness described above more reliably for when we wish to improve
 		// the performance. For now, just verify that 30k unquiesced ranges
 		// is tenable.
-		{false, 30000, 2 * time.Hour, "https://github.com/cockroachdb/cockroach/issues/51034"},
+		{false, 30000, 2 * time.Hour},
 	} {
 		item := item // for use in closure below
 		r.Add(testSpec{
-			Skip:    item.skip,
 			Name:    fmt.Sprintf("kv/splits/nodes=3/quiesce=%t", item.quiesce),
 			Owner:   OwnerKV,
 			Timeout: item.timeout,
@@ -601,7 +602,7 @@ func registerKVRangeLookups(r *testRegistry) {
 			duration := " --duration=10m"
 			readPercent := " --read-percent=50"
 			// We run kv with --tolerate-errors, since the relocate workload is
-			// expected to create `result is ambiguous (removing replica)` errors.
+			// expected to create `result is ambiguous (replica removed)` errors.
 			cmd = fmt.Sprintf("./workload run kv --tolerate-errors"+
 				concurrency+duration+readPercent+
 				" {pgurl:1-%d}", nodes)
@@ -646,7 +647,7 @@ func registerKVRangeLookups(r *testRegistry) {
 							EXPERIMENTAL_RELOCATE
 								SELECT ARRAY[$1, $2, $3], CAST(floor(random() * 9223372036854775808) AS INT)
 						`, newReplicas[0]+1, newReplicas[1]+1, newReplicas[2]+1)
-						if err != nil && !pgerror.IsSQLRetryableError(err) && !isExpectedRelocateError(err) {
+						if err != nil && !pgerror.IsSQLRetryableError(err) && !kv.IsExpectedRelocateError(err) {
 							return err
 						}
 					default:

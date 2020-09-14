@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
+	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -137,6 +138,9 @@ func (ds *DistSender) partialRangeFeed(
 			ri, err := ds.getRoutingInfo(ctx, rangeInfo.rs.Key, EvictionToken{}, false)
 			if err != nil {
 				log.VErrEventf(ctx, 1, "range descriptor re-lookup failed: %s", err)
+				if !isRangeLookupErrorRetryable(err) {
+					return err
+				}
 				continue
 			}
 			rangeInfo.token = ri
@@ -171,7 +175,7 @@ func (ds *DistSender) partialRangeFeed(
 			case errors.HasType(err, (*roachpb.RangeFeedRetryError)(nil)):
 				var t *roachpb.RangeFeedRetryError
 				if ok := errors.As(err, &t); !ok {
-					panic(fmt.Sprintf("wrong error type: %T", err))
+					panic(errors.AssertionFailedf("wrong error type: %T", err))
 				}
 				switch t.Reason {
 				case roachpb.RangeFeedRetryError_REASON_REPLICA_REMOVED,
@@ -232,7 +236,7 @@ func (ds *DistSender) singleRangeFeed(
 	// The RangeFeed is not used for system critical traffic so use a DefaultClass
 	// connection regardless of the range.
 	opts := SendOptions{class: rpc.DefaultClass}
-	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas)
+	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas.Descriptors())
 	if err != nil {
 		return args.Timestamp, err
 	}
@@ -253,6 +257,10 @@ func (ds *DistSender) singleRangeFeed(
 		stream, err := client.RangeFeed(clientCtx, &args)
 		if err != nil {
 			log.VErrEventf(ctx, 2, "RPC error: %s", err)
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
+				return args.Timestamp, err
+			}
 			continue
 		}
 		for {

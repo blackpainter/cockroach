@@ -17,9 +17,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -40,10 +40,10 @@ type deleteRangeNode struct {
 	// spans are the spans to delete.
 	spans roachpb.Spans
 	// desc is the table descriptor the delete is operating on.
-	desc *sqlbase.ImmutableTableDescriptor
+	desc *tabledesc.Immutable
 	// interleavedDesc are the table descriptors of any child interleaved tables
 	// the delete is operating on.
-	interleavedDesc []*sqlbase.ImmutableTableDescriptor
+	interleavedDesc []*tabledesc.Immutable
 	// fetcher is around to decode the returned keys from the DeleteRange, so that
 	// we can count the number of rows deleted.
 	fetcher row.Fetcher
@@ -107,14 +107,17 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 		}
 	}
 	if err := d.fetcher.Init(
+		params.ctx,
 		params.ExecCfg().Codec,
 		false, /* reverse */
 		// TODO(nvanbenschoten): it might make sense to use a FOR_UPDATE locking
 		// strength here. Consider hooking this in to the same knob that will
 		// control whether we perform locking implicitly during DELETEs.
 		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
 		false, /* isCheck */
 		params.p.alloc,
+		nil, /* memMonitor */
 		allTables...,
 	); err != nil {
 		return err
@@ -131,7 +134,7 @@ func (d *deleteRangeNode) startExec(params runParams) error {
 		for len(spans) != 0 {
 			b := params.p.txn.NewBatch()
 			d.deleteSpans(params, b, spans)
-			b.Header.MaxSpanRequestKeys = TableTruncateChunkSize
+			b.Header.MaxSpanRequestKeys = row.TableTruncateChunkSize
 			if err := params.p.txn.Run(ctx, b); err != nil {
 				return err
 			}

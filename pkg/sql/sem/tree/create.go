@@ -113,11 +113,12 @@ type CreateIndex struct {
 	Sharded     *ShardedIndexDef
 	// Extra columns to be stored together with the indexed ones as an optimization
 	// for improved reading performance.
-	Storing      NameList
-	Interleave   *InterleaveDef
-	PartitionBy  *PartitionBy
-	Predicate    Expr
-	Concurrently bool
+	Storing       NameList
+	Interleave    *InterleaveDef
+	PartitionBy   *PartitionBy
+	StorageParams StorageParams
+	Predicate     Expr
+	Concurrently  bool
 }
 
 // Format implements the NodeFormatter interface.
@@ -126,7 +127,7 @@ func (node *CreateIndex) Format(ctx *FmtCtx) {
 	if node.Unique {
 		ctx.WriteString("UNIQUE ")
 	}
-	if node.Inverted && !ctx.HasFlags(FmtPGIndexDef) {
+	if node.Inverted && !ctx.HasFlags(FmtPGCatalog) {
 		ctx.WriteString("INVERTED ")
 	}
 	ctx.WriteString("INDEX ")
@@ -142,7 +143,7 @@ func (node *CreateIndex) Format(ctx *FmtCtx) {
 	}
 	ctx.WriteString("ON ")
 	ctx.FormatNode(&node.Table)
-	if ctx.HasFlags(FmtPGIndexDef) {
+	if ctx.HasFlags(FmtPGCatalog) {
 		ctx.WriteString(" USING")
 		if node.Inverted {
 			ctx.WriteString(" gin")
@@ -166,6 +167,11 @@ func (node *CreateIndex) Format(ctx *FmtCtx) {
 	}
 	if node.PartitionBy != nil {
 		ctx.FormatNode(node.PartitionBy)
+	}
+	if node.StorageParams != nil {
+		ctx.WriteString(" WITH (")
+		ctx.FormatNode(&node.StorageParams)
+		ctx.WriteString(")")
 	}
 	if node.Predicate != nil {
 		ctx.WriteString(" WHERE ")
@@ -641,14 +647,15 @@ type ColumnFamilyConstraint struct {
 // IndexTableDef represents an index definition within a CREATE TABLE
 // statement.
 type IndexTableDef struct {
-	Name        Name
-	Columns     IndexElemList
-	Sharded     *ShardedIndexDef
-	Storing     NameList
-	Interleave  *InterleaveDef
-	Inverted    bool
-	PartitionBy *PartitionBy
-	Predicate   Expr
+	Name          Name
+	Columns       IndexElemList
+	Sharded       *ShardedIndexDef
+	Storing       NameList
+	Interleave    *InterleaveDef
+	Inverted      bool
+	PartitionBy   *PartitionBy
+	StorageParams StorageParams
+	Predicate     Expr
 }
 
 // Format implements the NodeFormatter interface.
@@ -677,6 +684,11 @@ func (node *IndexTableDef) Format(ctx *FmtCtx) {
 	}
 	if node.PartitionBy != nil {
 		ctx.FormatNode(node.PartitionBy)
+	}
+	if node.StorageParams != nil {
+		ctx.WriteString(" WITH (")
+		ctx.FormatNode(&node.StorageParams)
+		ctx.WriteString(")")
 	}
 	if node.Predicate != nil {
 		ctx.WriteString(" WHERE ")
@@ -1067,7 +1079,7 @@ type CreateTable struct {
 	Table         TableName
 	Interleave    *InterleaveDef
 	PartitionBy   *PartitionBy
-	Temporary     bool
+	Persistence   Persistence
 	StorageParams StorageParams
 	OnCommit      CreateTableOnCommitSetting
 	// In CREATE...AS queries, Defs represents a list of ColumnTableDefs, one for
@@ -1101,8 +1113,11 @@ func (node *CreateTable) AsHasUserSpecifiedPrimaryKey() bool {
 // Format implements the NodeFormatter interface.
 func (node *CreateTable) Format(ctx *FmtCtx) {
 	ctx.WriteString("CREATE ")
-	if node.Temporary {
+	switch node.Persistence {
+	case PersistenceTemporary:
 		ctx.WriteString("TEMPORARY ")
+	case PersistenceUnlogged:
+		ctx.WriteString("UNLOGGED ")
 	}
 	ctx.WriteString("TABLE ")
 	if node.IfNotExists {
@@ -1201,24 +1216,33 @@ func (node *CreateTable) HoistConstraints() {
 type CreateSchema struct {
 	IfNotExists bool
 	Schema      string
+	AuthRole    string
 }
 
 // Format implements the NodeFormatter interface.
 func (node *CreateSchema) Format(ctx *FmtCtx) {
-	ctx.WriteString("CREATE SCHEMA ")
+	ctx.WriteString("CREATE SCHEMA")
 
 	if node.IfNotExists {
-		ctx.WriteString("IF NOT EXISTS ")
+		ctx.WriteString(" IF NOT EXISTS")
 	}
 
-	ctx.WriteString(node.Schema)
+	if node.Schema != "" {
+		ctx.WriteString(" ")
+		ctx.WriteString(node.Schema)
+	}
+
+	if node.AuthRole != "" {
+		ctx.WriteString(" AUTHORIZATION ")
+		ctx.WriteString(node.AuthRole)
+	}
 }
 
 // CreateSequence represents a CREATE SEQUENCE statement.
 type CreateSequence struct {
 	IfNotExists bool
 	Name        TableName
-	Temporary   bool
+	Persistence Persistence
 	Options     SequenceOptions
 }
 
@@ -1226,7 +1250,7 @@ type CreateSequence struct {
 func (node *CreateSequence) Format(ctx *FmtCtx) {
 	ctx.WriteString("CREATE ")
 
-	if node.Temporary {
+	if node.Persistence == PersistenceTemporary {
 		ctx.WriteString("TEMPORARY ")
 	}
 
@@ -1522,12 +1546,13 @@ func (node *AlterRole) Format(ctx *FmtCtx) {
 
 // CreateView represents a CREATE VIEW statement.
 type CreateView struct {
-	Name        TableName
-	ColumnNames NameList
-	AsSource    *Select
-	IfNotExists bool
-	Temporary   bool
-	Replace     bool
+	Name         TableName
+	ColumnNames  NameList
+	AsSource     *Select
+	IfNotExists  bool
+	Persistence  Persistence
+	Replace      bool
+	Materialized bool
 }
 
 // Format implements the NodeFormatter interface.
@@ -1538,8 +1563,12 @@ func (node *CreateView) Format(ctx *FmtCtx) {
 		ctx.WriteString("OR REPLACE ")
 	}
 
-	if node.Temporary {
+	if node.Persistence == PersistenceTemporary {
 		ctx.WriteString("TEMPORARY ")
+	}
+
+	if node.Materialized {
+		ctx.WriteString("MATERIALIZED ")
 	}
 
 	ctx.WriteString("VIEW ")
@@ -1558,6 +1587,44 @@ func (node *CreateView) Format(ctx *FmtCtx) {
 
 	ctx.WriteString(" AS ")
 	ctx.FormatNode(node.AsSource)
+}
+
+// RefreshMaterializedView represents a REFRESH MATERIALIZED VIEW statement.
+type RefreshMaterializedView struct {
+	Name              *UnresolvedObjectName
+	Concurrently      bool
+	RefreshDataOption RefreshDataOption
+}
+
+// RefreshDataOption corresponds to arguments for the REFRESH MATERIALIZED VIEW
+// statement.
+type RefreshDataOption int
+
+const (
+	// RefreshDataDefault refers to no option provided to the REFRESH MATERIALIZED
+	// VIEW statement.
+	RefreshDataDefault RefreshDataOption = iota
+	// RefreshDataWithData refers to the WITH DATA option provided to the REFRESH
+	// MATERIALIZED VIEW statement.
+	RefreshDataWithData
+	// RefreshDataClear refers to the WITH NO DATA option provided to the REFRESH
+	// MATERIALIZED VIEW statement.
+	RefreshDataClear
+)
+
+// Format implements the NodeFormatter interface.
+func (node *RefreshMaterializedView) Format(ctx *FmtCtx) {
+	ctx.WriteString("REFRESH MATERIALIZED VIEW ")
+	if node.Concurrently {
+		ctx.WriteString("CONCURRENTLY ")
+	}
+	ctx.FormatNode(node.Name)
+	switch node.RefreshDataOption {
+	case RefreshDataWithData:
+		ctx.WriteString(" WITH DATA")
+	case RefreshDataClear:
+		ctx.WriteString(" WITH NO DATA")
+	}
 }
 
 // CreateStats represents a CREATE STATISTICS statement.

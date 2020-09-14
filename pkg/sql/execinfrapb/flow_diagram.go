@@ -22,8 +22,9 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/dustin/go-humanize"
@@ -130,14 +131,14 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 	details := []string{indexDetail(&tr.Table, tr.IndexIdx)}
 
 	if len(tr.Spans) > 0 {
-		tbl := sqlbase.NewImmutableTableDescriptor(tr.Table)
+		tbl := tabledesc.NewImmutable(tr.Table)
 		// only show the first span
 		idx, _, _ := tbl.FindIndexByIndexIdx(int(tr.IndexIdx))
-		valDirs := sqlbase.IndexKeyValDirs(idx)
+		valDirs := catalogkeys.IndexKeyValDirs(idx)
 
 		var spanStr strings.Builder
 		spanStr.WriteString("Spans: ")
-		spanStr.WriteString(sqlbase.PrettySpan(valDirs, tr.Spans[0].Span, 2))
+		spanStr.WriteString(catalogkeys.PrettySpan(valDirs, tr.Spans[0].Span, 2))
 
 		if len(tr.Spans) > 1 {
 			spanStr.WriteString(fmt.Sprintf(" and %d other", len(tr.Spans)-1))
@@ -248,33 +249,6 @@ func (mj *MergeJoinerSpec) summary() (string, []string) {
 		name = "MergeSetOp"
 	}
 	return name, orderedJoinDetails(mj.Type, mj.LeftOrdering, mj.RightOrdering, mj.OnExpr)
-}
-
-// summary implements the diagramCellType interface.
-func (irj *InterleavedReaderJoinerSpec) summary() (string, []string) {
-	// As of right now, we only plan InterleaveReaderJoiner with two
-	// tables.
-	tables := irj.Tables[:2]
-	details := make([]string, 0, len(tables)*6+3)
-	for i, table := range tables {
-		// left or right label
-		var tableLabel string
-		if i == 0 {
-			tableLabel = "Left"
-		} else if i == 1 {
-			tableLabel = "Right"
-		}
-		details = append(details, tableLabel)
-		// table@index name
-		details = append(details, indexDetail(&table.Desc, table.IndexIdx))
-		// Post process (filters, projections, renderExprs, limits/offsets)
-		details = append(details, table.Post.summaryWithPrefix(fmt.Sprintf("%s ", tableLabel))...)
-	}
-	details = append(details, "Joiner")
-	details = append(
-		details, orderedJoinDetails(irj.Type, tables[0].Ordering, tables[1].Ordering, irj.OnExpr)...,
-	)
-	return "InterleaveReaderJoiner", details
 }
 
 // summary implements the diagramCellType interface.

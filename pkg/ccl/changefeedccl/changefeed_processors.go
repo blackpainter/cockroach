@@ -27,8 +27,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -205,7 +205,8 @@ func (ca *changeAggregator) Start(ctx context.Context) context.Context {
 	_, withDiff := ca.spec.Feed.Opts[changefeedbase.OptDiff]
 	kvfeedCfg := makeKVFeedCfg(ca.flowCtx.Cfg, leaseMgr, ca.kvFeedMemMon, ca.spec,
 		spans, withDiff, buf, metrics)
-	rowsFn := kvsToRows(ca.flowCtx.Codec(), leaseMgr, ca.spec.Feed, buf.Get)
+	cfg := ca.flowCtx.Cfg
+	rowsFn := kvsToRows(ctx, cfg.Codec, cfg.Settings, cfg.DB, leaseMgr, cfg.HydratedTables, ca.spec.Feed, buf.Get)
 	ca.tickFn = emitEntries(ca.flowCtx.Cfg.Settings, ca.spec.Feed,
 		kvfeedCfg.InitialHighWater, sf, ca.encoder, ca.sink, rowsFn, knobs, metrics)
 	ca.startKVFeed(ctx, kvfeedCfg)
@@ -343,7 +344,7 @@ func (ca *changeAggregator) close() {
 }
 
 // Next is part of the RowSource interface.
-func (ca *changeAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (ca *changeAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for ca.State == execinfra.StateRunning {
 		if !ca.changedRowBuf.IsEmpty() {
 			return ca.ProcessRowHelper(ca.changedRowBuf.Pop()), nil
@@ -381,11 +382,11 @@ func (ca *changeAggregator) tick() error {
 		// Enqueue a row to be returned that indicates some span-level resolved
 		// timestamp has advanced. If any rows were queued in `sink`, they must
 		// be emitted first.
-		ca.resolvedSpanBuf.Push(sqlbase.EncDatumRow{
-			sqlbase.EncDatum{Datum: tree.NewDBytes(tree.DBytes(resolvedBytes))},
-			sqlbase.EncDatum{Datum: tree.DNull}, // topic
-			sqlbase.EncDatum{Datum: tree.DNull}, // key
-			sqlbase.EncDatum{Datum: tree.DNull}, // value
+		ca.resolvedSpanBuf.Push(rowenc.EncDatumRow{
+			rowenc.EncDatum{Datum: tree.NewDBytes(tree.DBytes(resolvedBytes))},
+			rowenc.EncDatum{Datum: tree.DNull}, // topic
+			rowenc.EncDatum{Datum: tree.DNull}, // key
+			rowenc.EncDatum{Datum: tree.DNull}, // value
 		})
 	}
 	return nil
@@ -413,7 +414,7 @@ type changeFrontier struct {
 	flowCtx *execinfra.FlowCtx
 	spec    execinfrapb.ChangeFrontierSpec
 	memAcc  mon.BoundAccount
-	a       sqlbase.DatumAlloc
+	a       rowenc.DatumAlloc
 
 	// input returns rows from one or more changeAggregator processors
 	input execinfra.RowSource
@@ -647,7 +648,7 @@ func (cf *changeFrontier) shouldProtectBoundaries() bool {
 }
 
 // Next is part of the RowSource interface.
-func (cf *changeFrontier) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (cf *changeFrontier) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for cf.State == execinfra.StateRunning {
 		if !cf.passthroughBuf.IsEmpty() {
 			return cf.ProcessRowHelper(cf.passthroughBuf.Pop()), nil
@@ -692,7 +693,7 @@ func (cf *changeFrontier) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMeta
 	return nil, cf.DrainHelper()
 }
 
-func (cf *changeFrontier) noteResolvedSpan(d sqlbase.EncDatum) error {
+func (cf *changeFrontier) noteResolvedSpan(d rowenc.EncDatum) error {
 	if err := d.EnsureDecoded(changefeedResultTypes[0], &cf.a); err != nil {
 		return err
 	}

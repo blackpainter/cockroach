@@ -869,7 +869,7 @@ func (node *ComparisonExpr) doc(p *PrettyCfg) pretty.Doc {
 		opStr = "IS"
 	}
 	opDoc := pretty.Keyword(opStr)
-	if node.Operator.hasSubOperator() {
+	if node.Operator.HasSubOperator() {
 		opDoc = pretty.ConcatSpace(pretty.Text(node.SubOperator.String()), opDoc)
 	}
 	return pretty.Group(
@@ -954,6 +954,9 @@ func (node *Insert) doc(p *PrettyCfg) pretty.Doc {
 			cond = p.bracket("(", p.Doc(&node.OnConflict.Columns), ")")
 		}
 		items = append(items, p.row("ON CONFLICT", cond))
+		if node.OnConflict.ArbiterPredicate != nil {
+			items = append(items, p.row("WHERE", p.Doc(node.OnConflict.ArbiterPredicate)))
+		}
 
 		if node.OnConflict.DoNothing {
 			items = append(items, p.row("DO", pretty.Keyword("NOTHING")))
@@ -1197,14 +1200,17 @@ func (node *UpdateExpr) doc(p *PrettyCfg) pretty.Doc {
 func (node *CreateTable) doc(p *PrettyCfg) pretty.Doc {
 	// Final layout:
 	//
-	// CREATE [TEMP] TABLE [IF NOT EXISTS] name ( .... ) [AS]
+	// CREATE [TEMP | UNLOGGED] TABLE [IF NOT EXISTS] name ( .... ) [AS]
 	//     [SELECT ...] - for CREATE TABLE AS
 	//     [INTERLEAVE ...]
 	//     [PARTITION BY ...]
 	//
 	title := pretty.Keyword("CREATE")
-	if node.Temporary {
+	switch node.Persistence {
+	case PersistenceTemporary:
 		title = pretty.ConcatSpace(title, pretty.Keyword("TEMPORARY"))
+	case PersistenceUnlogged:
+		title = pretty.ConcatSpace(title, pretty.Keyword("UNLOGGED"))
 	}
 	title = pretty.ConcatSpace(title, pretty.Keyword("TABLE"))
 	if node.IfNotExists {
@@ -1250,8 +1256,11 @@ func (node *CreateView) doc(p *PrettyCfg) pretty.Doc {
 	if node.Replace {
 		title = pretty.ConcatSpace(title, pretty.Keyword("OR REPLACE"))
 	}
-	if node.Temporary {
+	if node.Persistence == PersistenceTemporary {
 		title = pretty.ConcatSpace(title, pretty.Keyword("TEMPORARY"))
+	}
+	if node.Materialized {
+		title = pretty.ConcatSpace(title, pretty.Keyword("MATERIALIZED"))
 	}
 	title = pretty.ConcatSpace(title, pretty.Keyword("VIEW"))
 	if node.IfNotExists {
@@ -1507,6 +1516,7 @@ func (node *CreateIndex) doc(p *PrettyCfg) pretty.Doc {
 	//    [STORING ( ... )]
 	//    [INTERLEAVE ...]
 	//    [PARTITION BY ...]
+	//    [WITH ...]
 	//    [WHERE ...]
 	//
 	title := make([]pretty.Doc, 0, 6)
@@ -1549,6 +1559,13 @@ func (node *CreateIndex) doc(p *PrettyCfg) pretty.Doc {
 	}
 	if node.PartitionBy != nil {
 		clauses = append(clauses, p.Doc(node.PartitionBy))
+	}
+	if node.StorageParams != nil {
+		clauses = append(clauses, p.bracketKeyword(
+			"WITH", " (",
+			p.Doc(&node.StorageParams),
+			")", "",
+		))
 	}
 	if node.Predicate != nil {
 		clauses = append(clauses, p.nestUnder(pretty.Keyword("WHERE"), p.Doc(node.Predicate)))
@@ -1637,6 +1654,12 @@ func (node *IndexTableDef) doc(p *PrettyCfg) pretty.Doc {
 	}
 	if node.PartitionBy != nil {
 		clauses = append(clauses, p.Doc(node.PartitionBy))
+	}
+	if node.StorageParams != nil {
+		clauses = append(
+			clauses,
+			p.bracketKeyword("WITH", "(", p.Doc(&node.StorageParams), ")", ""),
+		)
 	}
 	if node.Predicate != nil {
 		clauses = append(clauses, p.nestUnder(pretty.Keyword("WHERE"), p.Doc(node.Predicate)))
@@ -1938,7 +1961,10 @@ func (node *Backup) doc(p *PrettyCfg) pretty.Doc {
 		items = append(items, node.Targets.docRow(p))
 	}
 	if node.Nested {
-		if node.AppendToLatest {
+		if node.Subdir != nil {
+			items = append(items, p.row("INTO ", p.Doc(node.Subdir)))
+			items = append(items, p.row(" IN ", p.Doc(&node.To)))
+		} else if node.AppendToLatest {
 			items = append(items, p.row("INTO LATEST IN", p.Doc(&node.To)))
 		} else {
 			items = append(items, p.row("INTO", p.Doc(&node.To)))
@@ -1980,7 +2006,7 @@ func (node *Restore) doc(p *PrettyCfg) pretty.Doc {
 	if node.AsOf.Expr != nil {
 		items = append(items, node.AsOf.docRow(p))
 	}
-	if node.Options != nil {
+	if !node.Options.IsDefault() {
 		items = append(items, p.row("WITH", p.Doc(&node.Options)))
 	}
 	return p.rlTable(items...)

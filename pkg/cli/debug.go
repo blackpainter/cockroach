@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	gohex "encoding/hex"
 	"fmt"
 	"math"
@@ -40,7 +41,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -137,9 +141,10 @@ func OpenEngine(dir string, stopper *stop.Stopper, opts OpenEngineOptions) (stor
 	}
 
 	var db storage.Engine
-	storageEngine := resolveStorageEngineType(context.Background(), storage.DefaultStorageEngine, storageConfig)
 
-	switch storageEngine {
+	switch storage.DefaultStorageEngine {
+	case enginepb.EngineTypeDefault:
+		fallthrough
 	case enginepb.EngineTypePebble:
 		cfg := storage.PebbleConfig{
 			StorageConfig: storageConfig,
@@ -192,6 +197,32 @@ func runDebugKeys(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if debugCtx.decodeAsTableDesc != "" {
+		bytes, err := base64.StdEncoding.DecodeString(debugCtx.decodeAsTableDesc)
+		if err != nil {
+			return err
+		}
+		var desc descpb.Descriptor
+		if err := protoutil.Unmarshal(bytes, &desc); err != nil {
+			return err
+		}
+		table := tabledesc.NewImmutable(*descpb.TableFromDescriptor(&desc, hlc.Timestamp{}))
+
+		fn := func(kv storage.MVCCKeyValue) (string, error) {
+			var v roachpb.Value
+			v.RawBytes = kv.Value
+			_, names, values, err := row.DecodeRowInfo(context.Background(), table, kv.Key.Key, &v, true)
+			if err != nil {
+				return "", err
+			}
+			pairs := make([]string, len(names))
+			for i := range pairs {
+				pairs[i] = fmt.Sprintf("%s=%s", names[i], values[i])
+			}
+			return strings.Join(pairs, ", "), nil
+		}
+		kvserver.DebugSprintKeyValueDecoders = append(kvserver.DebugSprintKeyValueDecoders, fn)
+	}
 	printer := printKey
 	if debugCtx.values {
 		printer = func(kv storage.MVCCKeyValue) (bool, error) {
@@ -456,6 +487,27 @@ Decode and print a hexadecimal-encoded key-value pair.
 	},
 }
 
+var debugDecodeProtoName string
+var debugDecodeProtoCmd = &cobra.Command{
+	Use:   "decode-proto",
+	Short: "decode-proto <proto> --name=<fully qualified proto name>",
+	Long: `
+Read from stdin and attempt to decode any hex or base64 encoded proto fields and
+output them as JSON. All other fields will be outputted unchanged. Output fields
+will be separated by tabs.
+	
+The default value for --schema is 'cockroach.sql.sqlbase.Descriptor'.
+For example:
+
+$ decode-proto < cat debug/system.decsriptor.txt
+id	descriptor	hex_descriptor
+1	\022!\012\006system\020\001\032\025\012\011\012\005admin\0200\012\010\012\004root\0200	{"database": {"id": 1, "modificationTime": {}, "name": "system", "privileges": {"users": [{"privileges": 48, "user": "admin"}, {"privileges": 48, "user": "root"}]}}}
+...	
+`,
+	Args: cobra.ArbitraryArgs,
+	RunE: runDebugDecodeProto,
+}
+
 var debugRaftLogCmd = &cobra.Command{
 	Use:   "raft-log <directory> <range id>",
 	Short: "print the raft log for a range",
@@ -579,7 +631,7 @@ func runDebugGCCmd(cmd *cobra.Command, args []string) error {
 			now, thresh, policy,
 			gc.NoopGCer{},
 			func(_ context.Context, _ []roachpb.Intent) error { return nil },
-			func(_ context.Context, _ *roachpb.Transaction, _ []roachpb.LockUpdate) error { return nil },
+			func(_ context.Context, _ *roachpb.Transaction) error { return nil },
 		)
 		if err != nil {
 			return err
@@ -896,7 +948,7 @@ Must only be used when the dead stores are lost and unrecoverable. If
 the dead stores were to rejoin the cluster after this command was
 used, data may be corrupted.
 
-This comand will prompt for confirmation before committing its changes.
+This command will prompt for confirmation before committing its changes.
 
 After this command is used, the node should not be restarted until at
 least 10 seconds have passed since it was stopped. Restarting it too
@@ -967,7 +1019,7 @@ func removeDeadReplicas(
 		removeDeadReplicasOpts.deadStoreIDs)
 
 	if _, ok := deadStoreIDs[storeIdent.StoreID]; ok {
-		return nil, errors.Errorf("This store's ID (%s) marked as dead, aborting", storeIdent.StoreID)
+		return nil, errors.Errorf("this store's ID (%s) marked as dead, aborting", storeIdent.StoreID)
 	}
 
 	var newDescs []roachpb.RangeDescriptor
@@ -1191,6 +1243,7 @@ var debugCmds = append(DebugCmdsForRocksDB,
 	debugBallastCmd,
 	debugDecodeKeyCmd,
 	debugDecodeValueCmd,
+	debugDecodeProtoCmd,
 	debugRocksDBCmd,
 	debugSSTDumpCmd,
 	debugGossipValuesCmd,
@@ -1251,6 +1304,9 @@ func init() {
 	debugPebbleCmd.AddCommand(pebbleTool.Commands...)
 	DebugCmd.AddCommand(debugPebbleCmd)
 
+	debugDoctorCmd.AddCommand(debugDoctorCmds...)
+	DebugCmd.AddCommand(debugDoctorCmd)
+
 	f := debugSyncBenchCmd.Flags()
 	f.IntVarP(&syncBenchOpts.Concurrency, "concurrency", "c", syncBenchOpts.Concurrency,
 		"number of concurrent writers")
@@ -1282,4 +1338,8 @@ func init() {
 		"keep the output log file redactable")
 	f.BoolVar(&debugMergeLogsOpts.redactInput, "redact", debugMergeLogsOpts.redactInput,
 		"redact the input files to remove sensitive information")
+
+	f = debugDecodeProtoCmd.Flags()
+	f.StringVar(&debugDecodeProtoName, "schema", "cockroach.sql.sqlbase.Descriptor",
+		"fully qualified name of the proto to decode")
 }

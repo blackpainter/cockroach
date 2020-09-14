@@ -16,10 +16,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -96,7 +96,27 @@ func (r schemaChangeGCResumer) Resume(
 	if err != nil {
 		return err
 	}
-	zoneCfgFilter, gossipUpdateC := setupConfigWatcher(execCfg)
+
+	// If there are any interleaved indexes to drop as part of a table TRUNCATE
+	// operation, then drop the indexes before waiting on the GC timer.
+	if len(details.InterleavedIndexes) > 0 {
+		// Before deleting any indexes, ensure that old versions of the table
+		// descriptor are no longer in use.
+		if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, details.InterleavedTable.ID); err != nil {
+			return err
+		}
+		if err := sql.TruncateInterleavedIndexes(
+			ctx,
+			execCfg,
+			tabledesc.NewImmutable(*details.InterleavedTable),
+			details.InterleavedIndexes,
+		); err != nil {
+			return err
+		}
+	}
+
+	gossipUpdateC, cleanup := execCfg.GCJobNotifier.AddNotifyee(ctx)
+	defer cleanup()
 	tableDropTimes, indexDropTimes := getDropTimes(details)
 
 	allTables := getAllTablesWaitingForGC(details, progress)
@@ -121,25 +141,16 @@ func (r schemaChangeGCResumer) Resume(
 			if log.V(2) {
 				log.Info(ctx, "received a new system config")
 			}
-			// TODO (lucy): Currently we're calling refreshTables on every zone config
-			// update to any table. We should really be only updating a cached
-			// TTL whenever we get an update on one of the tables/indexes (or the db)
-			// that this job is responsible for, and computing the earliest deadline
-			// from our set of cached TTL values.
-			cfg := execCfg.SystemConfig.GetSystemConfig()
-			zoneConfigUpdated := false
-			zoneCfgFilter.ForModified(cfg, func(kv roachpb.KeyValue) {
-				zoneConfigUpdated = true
-			})
-			if !zoneConfigUpdated {
-				log.VEventf(ctx, 2, "no zone config updates, continuing")
-				continue
-			}
 			remainingTables := getAllTablesWaitingForGC(details, progress)
 			if len(remainingTables) == 0 {
 				return nil
 			}
 			expired, earliestDeadline = refreshTables(ctx, execCfg, remainingTables, tableDropTimes, indexDropTimes, r.jobID, progress)
+
+			if isDoneGC(progress) {
+				return nil
+			}
+
 			timerDuration := time.Until(earliestDeadline)
 			if expired {
 				timerDuration = 0

@@ -21,11 +21,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -39,11 +40,11 @@ type mutationTest struct {
 	testing.TB
 	*sqlutils.SQLRunner
 	kvDB      *kv.DB
-	tableDesc *sqlbase.MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
 }
 
 func makeMutationTest(
-	t *testing.T, kvDB *kv.DB, db *gosql.DB, tableDesc *sqlbase.MutableTableDescriptor,
+	t *testing.T, kvDB *kv.DB, db *gosql.DB, tableDesc *tabledesc.Mutable,
 ) mutationTest {
 	return mutationTest{
 		TB:        t,
@@ -89,7 +90,7 @@ func (mt mutationTest) makeMutationsActive() {
 	}
 	if err := mt.kvDB.Put(
 		context.Background(),
-		sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, mt.tableDesc.ID),
+		catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, mt.tableDesc.ID),
 		mt.tableDesc.DescriptorProto(),
 	); err != nil {
 		mt.Fatal(err)
@@ -147,7 +148,7 @@ func (mt mutationTest) writeMutation(m descpb.DescriptorMutation) {
 	}
 	if err := mt.kvDB.Put(
 		context.Background(),
-		sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, mt.tableDesc.ID),
+		catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, mt.tableDesc.ID),
 		mt.tableDesc.DescriptorProto(),
 	); err != nil {
 		mt.Fatal(err)
@@ -259,7 +260,14 @@ CREATE INDEX allidx ON t.test (k, v);
 				func(t *testing.T) {
 
 					// Init table to start state.
-					mTest.Exec(t, `TRUNCATE TABLE t.test`)
+					if _, err := sqlDB.Exec(`
+DROP TABLE t.test;
+CREATE TABLE t.test (k VARCHAR PRIMARY KEY DEFAULT 'default', v VARCHAR, i VARCHAR DEFAULT 'i', FAMILY (k), FAMILY (v), FAMILY (i));
+CREATE INDEX allidx ON t.test (k, v);
+`); err != nil {
+						t.Fatal(err)
+					}
+
 					// read table descriptor
 					mTest.tableDesc = catalogkv.TestingGetMutableExistingTableDescriptor(
 						kvDB, keys.SystemSQLCodec, "t", "test")
@@ -524,6 +532,12 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR, INDEX foo (v));
 			if _, err := sqlDB.Exec(`TRUNCATE TABLE t.test`); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := sqlDB.Exec(`
+DROP TABLE t.test;
+CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR, INDEX foo (v));
+`); err != nil {
+				t.Fatal(err)
+			}
 			// read table descriptor
 			mTest.tableDesc = catalogkv.TestingGetMutableExistingTableDescriptor(
 				kvDB, keys.SystemSQLCodec, "t", "test")
@@ -687,6 +701,13 @@ CREATE INDEX allidx ON t.test (k, v);
 					continue
 				}
 				// Init table to start state.
+				if _, err := sqlDB.Exec(`
+DROP TABLE t.test;
+CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR, i CHAR, INDEX foo (i, v), FAMILY (k), FAMILY (v), FAMILY (i));
+CREATE INDEX allidx ON t.test (k, v);
+`); err != nil {
+					t.Fatal(err)
+				}
 				if _, err := sqlDB.Exec(`TRUNCATE TABLE t.test`); err != nil {
 					t.Fatal(err)
 				}
@@ -1177,11 +1198,11 @@ func TestAddingFKs(t *testing.T) {
 	// Step the referencing table back to the ADD state.
 	ordersDesc := catalogkv.TestingGetMutableExistingTableDescriptor(
 		kvDB, keys.SystemSQLCodec, "t", "orders")
-	ordersDesc.State = descpb.TableDescriptor_ADD
+	ordersDesc.State = descpb.DescriptorState_ADD
 	ordersDesc.Version++
 	if err := kvDB.Put(
 		context.Background(),
-		sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, ordersDesc.ID),
+		catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, ordersDesc.ID),
 		ordersDesc.DescriptorProto(),
 	); err != nil {
 		t.Fatal(err)

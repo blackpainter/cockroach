@@ -180,12 +180,12 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 		// Ensure that insert columns include all columns except for delete-only
 		// mutation columns (which do not need to be part of INSERT).
 		for i, n := 0, tab.ColumnCount(); i < n; i++ {
-			kind := tab.ColumnKind(i)
-			if kind != cat.DeleteOnly && kind != cat.System && t.InsertCols[i] == 0 {
+			kind := tab.Column(i).Kind()
+			if (kind == cat.Ordinary || kind == cat.WriteOnly) && t.InsertCols[i] == 0 {
 				panic(errors.AssertionFailedf("insert values not provided for all table columns"))
 			}
-			if kind == cat.System && t.InsertCols[i] != 0 {
-				panic(errors.AssertionFailedf("system column found in insertion columns"))
+			if (kind == cat.System || kind == cat.Virtual) && t.InsertCols[i] != 0 {
+				panic(errors.AssertionFailedf("system or virtual column found in insertion columns"))
 			}
 		}
 
@@ -205,12 +205,12 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 		meta := m.Metadata()
 		left, right := meta.Table(t.LeftTable), meta.Table(t.RightTable)
 		for i := 0; i < left.ColumnCount(); i++ {
-			if cat.IsSystemColumn(left, i) && t.Cols.Contains(t.LeftTable.ColumnID(i)) {
+			if left.Column(i).Kind() == cat.System && t.Cols.Contains(t.LeftTable.ColumnID(i)) {
 				panic(errors.AssertionFailedf("zigzag join should not contain system column"))
 			}
 		}
 		for i := 0; i < right.ColumnCount(); i++ {
-			if cat.IsSystemColumn(right, i) && t.Cols.Contains(t.RightTable.ColumnID(i)) {
+			if right.Column(i).Kind() == cat.System && t.Cols.Contains(t.RightTable.ColumnID(i)) {
 				panic(errors.AssertionFailedf("zigzag join should not contain system column"))
 			}
 		}
@@ -267,7 +267,7 @@ func (m *Memo) checkMutationExpr(rel RelExpr, private *MutationPrivate) {
 	tab := m.Metadata().Table(private.Table)
 	var mutCols opt.ColSet
 	for i, n := 0, tab.ColumnCount(); i < n; i++ {
-		if cat.IsMutationColumn(tab, i) {
+		if tab.Column(i).IsMutation() {
 			mutCols.Add(private.Table.ColumnID(i))
 		}
 	}
@@ -303,10 +303,10 @@ func checkFilters(filters FiltersExpr) {
 	for _, item := range filters {
 		if item.Condition.Op() == opt.RangeOp {
 			if !item.scalar.TightConstraints {
-				panic(errors.AssertionFailedf("Range operator should always have tight constraints"))
+				panic(errors.AssertionFailedf("range operator should always have tight constraints"))
 			}
 			if item.scalar.OuterCols.Len() != 1 {
-				panic(errors.AssertionFailedf("Range operator should have exactly one outer col"))
+				panic(errors.AssertionFailedf("range operator should have exactly one outer col"))
 			}
 		}
 	}
@@ -338,7 +338,11 @@ func checkOutputCols(e opt.Expr) {
 			continue
 		}
 
-		// The output columns of child expressions cannot overlap.
+		// The output columns of child expressions cannot overlap. The only
+		// exception is the first child of RecursiveCTE.
+		if e.Op() == opt.RecursiveCTEOp && i == 0 {
+			continue
+		}
 		cols := rel.Relational().OutputCols
 		if set.Intersects(cols) {
 			panic(errors.AssertionFailedf(

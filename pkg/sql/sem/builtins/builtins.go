@@ -38,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
@@ -46,9 +47,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/protoreflect"
+	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -88,7 +91,7 @@ const (
 	categoryDateAndTime   = "Date and time"
 	categoryEnum          = "Enum"
 	categoryGenerator     = "Set-returning"
-	categoryGeospatial    = "Geospatial"
+	categorySpatial       = "Spatial"
 	categoryIDGeneration  = "ID generation"
 	categoryJSON          = "JSONB"
 	categoryMultiTenancy  = "Multi-tenancy"
@@ -298,7 +301,7 @@ var builtins = map[string]builtinDefinition{
 			// In Postgres concat can take any arguments, converting them to
 			// their text representation. Since the text representation can
 			// depend on the context (e.g. timezone), the function is Stable. In
-			// our case, we only take String inputs so our version is Immutable.
+			// our case, we only take String inputs so our version is ImmutableCopy.
 			IgnoreVolatilityCheck: true,
 		},
 	),
@@ -344,7 +347,7 @@ var builtins = map[string]builtinDefinition{
 			// In Postgres concat_ws can take any arguments, converting them to
 			// their text representation. Since the text representation can
 			// depend on the context (e.g. timezone), the function is Stable. In
-			// our case, we only take String inputs so our version is Immutable.
+			// our case, we only take String inputs so our version is ImmutableCopy.
 			IgnoreVolatilityCheck: true,
 		},
 	),
@@ -3339,6 +3342,23 @@ may increase either contention or retry errors, or both.`,
 		},
 	),
 
+	"crdb_internal.node_id": makeBuiltin(
+		tree.FunctionProperties{Category: categorySystemInfo},
+		tree.Overload{
+			Types:      tree.ArgTypes{},
+			ReturnType: tree.FixedReturnType(types.Int),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				dNodeID := tree.DNull
+				if nodeID, ok := ctx.NodeID.OptionalNodeID(); ok {
+					dNodeID = tree.NewDInt(tree.DInt(nodeID))
+				}
+				return dNodeID, nil
+			},
+			Info:       "Returns the node ID.",
+			Volatility: tree.VolatilityStable,
+		},
+	),
+
 	"crdb_internal.cluster_name": makeBuiltin(
 		tree.FunctionProperties{Category: categorySystemInfo},
 		tree.Overload{
@@ -3526,7 +3546,7 @@ may increase either contention or retry errors, or both.`,
 						}
 						newDatum = tree.DNull
 					} else {
-						expectedTyp := col.DatumType()
+						expectedTyp := col.Type
 						newDatum, err = tree.PerformCast(ctx, d, expectedTyp)
 						if err != nil {
 							return nil, errors.WithHint(err, "try to explicitly cast each value to the corresponding column type")
@@ -3542,8 +3562,8 @@ may increase either contention or retry errors, or both.`,
 					colMap[id] = i
 				}
 				// Finally, encode the index key using the provided datums.
-				keyPrefix := sqlbase.MakeIndexKeyPrefix(ctx.Codec, tableDesc, indexDesc.ID)
-				res, _, err := sqlbase.EncodePartialIndexKey(tableDesc, indexDesc, len(datums), colMap, datums, keyPrefix)
+				keyPrefix := rowenc.MakeIndexKeyPrefix(ctx.Codec, tableDesc, indexDesc.ID)
+				res, _, err := rowenc.EncodePartialIndexKey(tableDesc, indexDesc, len(datums), colMap, datums, keyPrefix)
 				if err != nil {
 					return nil, err
 				}
@@ -3744,7 +3764,7 @@ may increase either contention or retry errors, or both.`,
 			},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				return tree.NewDString(sqlbase.PrettyKey(
+				return tree.NewDString(catalogkeys.PrettyKey(
 					nil, /* valDirs */
 					roachpb.Key(tree.MustBeDBytes(args[0])),
 					int(tree.MustBeDInt(args[1])))), nil
@@ -3901,7 +3921,7 @@ may increase either contention or retry errors, or both.`,
 				if indexDesc.GeoConfig.S2Geography == nil {
 					return nil, errors.Errorf("index_id %d is not a geography inverted index", indexID)
 				}
-				keys, err := sqlbase.EncodeGeoInvertedIndexTableKeys(g, nil, indexDesc)
+				keys, err := rowenc.EncodeGeoInvertedIndexTableKeys(g, nil, indexDesc)
 				if err != nil {
 					return nil, err
 				}
@@ -3935,7 +3955,7 @@ may increase either contention or retry errors, or both.`,
 				if indexDesc.GeoConfig.S2Geometry == nil {
 					return nil, errors.Errorf("index_id %d is not a geometry inverted index", indexID)
 				}
-				keys, err := sqlbase.EncodeGeoInvertedIndexTableKeys(g, nil, indexDesc)
+				keys, err := rowenc.EncodeGeoInvertedIndexTableKeys(g, nil, indexDesc)
 				if err != nil {
 					return nil, err
 				}
@@ -3982,7 +4002,7 @@ may increase either contention or retry errors, or both.`,
 					// elements.
 					return tree.DZero, nil
 				}
-				keys, err := sqlbase.EncodeInvertedIndexTableKeys(arr, nil)
+				keys, err := rowenc.EncodeInvertedIndexTableKeys(arr, nil)
 				if err != nil {
 					return nil, err
 				}
@@ -4014,6 +4034,39 @@ may increase either contention or retry errors, or both.`,
 				return tree.MakeDBool(tree.DBool(isAdmin)), nil
 			},
 			Info:       "Retrieves the current user's admin status.",
+			Volatility: tree.VolatilityStable,
+		},
+	),
+
+	// Returns true iff the current user has the specified role option.
+	// Note: it would be a privacy leak to extend this to check arbitrary usernames.
+	"crdb_internal.has_role_option": makeBuiltin(
+		tree.FunctionProperties{
+			Category:         categorySystemInfo,
+			DistsqlBlocklist: true,
+		},
+		tree.Overload{
+			Types: tree.ArgTypes{
+				{"option", types.String},
+			},
+			ReturnType: tree.FixedReturnType(types.Bool),
+			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				if evalCtx.SessionAccessor == nil {
+					return nil, errors.AssertionFailedf("session accessor not set")
+				}
+				optionStr := string(tree.MustBeDString(args[0]))
+				option, ok := roleoption.ByName[optionStr]
+				if !ok {
+					return nil, errors.Newf("unrecognized role option %s", optionStr)
+				}
+				ctx := evalCtx.Ctx()
+				ok, err := evalCtx.SessionAccessor.HasRoleOption(ctx, option)
+				if err != nil {
+					return nil, err
+				}
+				return tree.MakeDBool(tree.DBool(ok)), nil
+			},
+			Info:       "Returns whether the current user has the specified role option",
 			Volatility: tree.VolatilityStable,
 		},
 	),
@@ -4104,6 +4157,25 @@ may increase either contention or retry errors, or both.`,
 			},
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
 			Volatility: tree.VolatilityVolatile,
+		},
+	),
+
+	// Returns true iff the given sqlliveness session is not expired.
+	"crdb_internal.sql_liveness_is_alive": makeBuiltin(
+		tree.FunctionProperties{Category: categoryMultiTenancy},
+		tree.Overload{
+			Types:      tree.ArgTypes{{"session_id", types.Bytes}},
+			ReturnType: tree.FixedReturnType(types.Bool),
+			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				sid := sqlliveness.SessionID(*(args[0].(*tree.DBytes)))
+				live, err := evalCtx.SQLLivenessReader.IsAlive(evalCtx.Context, sid)
+				if err != nil {
+					return tree.MakeDBool(true), err
+				}
+				return tree.MakeDBool(tree.DBool(live)), nil
+			},
+			Info:       "Checks is given sqlliveness session id is not expired",
+			Volatility: tree.VolatilityStable,
 		},
 	),
 
@@ -6055,7 +6127,7 @@ func asJSONBuildObjectKey(d tree.Datum, loc *time.Location) (string, error) {
 		), nil
 	case *tree.DBool, *tree.DInt, *tree.DFloat, *tree.DDecimal, *tree.DTimestamp,
 		*tree.DDate, *tree.DUuid, *tree.DInterval, *tree.DBytes, *tree.DIPAddr, *tree.DOid,
-		*tree.DTime, *tree.DTimeTZ, *tree.DBitArray, *tree.DGeography, *tree.DGeometry:
+		*tree.DTime, *tree.DTimeTZ, *tree.DBitArray, *tree.DGeography, *tree.DGeometry, *tree.DBox2D:
 		return tree.AsStringWithFlags(d, tree.FmtBareStrings), nil
 	default:
 		return "", errors.AssertionFailedf("unexpected type %T for key value", d)

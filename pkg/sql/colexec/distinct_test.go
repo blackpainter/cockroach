@@ -163,37 +163,35 @@ func TestDistinct(t *testing.T) {
 			distinctCols: []uint32{0},
 			typs:         []*types.T{types.Jsonb, types.String},
 			tuples: tuples{
-				{`{"id": 1}`, "a"},
-				{`{"id": 2}`, "b"},
-				{`{"id": 3}`, "c"},
-				{`{"id": 1}`, "1"},
-				{`{"id": null}`, "d"},
-				{`{"id": 2}`, "2"},
-				{`{"id": 5}`, "e"},
-				{`{"id": 6}`, "f"},
-				{`{"id": 3}`, "3"},
+				{`'{"id": 1}'`, "a"},
+				{`'{"id": 2}'`, "b"},
+				{`'{"id": 3}'`, "c"},
+				{`'{"id": 1}'`, "1"},
+				{`'{"id": null}'`, "d"},
+				{`'{"id": 2}'`, "2"},
+				{`'{"id": 5}'`, "e"},
+				{`'{"id": 6}'`, "f"},
+				{`'{"id": 3}'`, "3"},
 			},
 			expected: tuples{
-				{`{"id": 1}`, "a"},
-				{`{"id": 2}`, "b"},
-				{`{"id": 3}`, "c"},
-				{`{"id": null}`, "d"},
-				{`{"id": 5}`, "e"},
-				{`{"id": 6}`, "f"},
+				{`'{"id": 1}'`, "a"},
+				{`'{"id": 2}'`, "b"},
+				{`'{"id": 3}'`, "c"},
+				{`'{"id": null}'`, "d"},
+				{`'{"id": 5}'`, "e"},
+				{`'{"id": 6}'`, "f"},
 			},
 		},
 	}
 
 	for _, tc := range tcs {
-		for _, numOfBuckets := range []uint64{1, 3, 5, HashTableNumBuckets} {
-			log.Infof(context.Background(), "unordered/numOfBuckets=%d", numOfBuckets)
-			runTestsWithTyps(t, []tuples{tc.tuples}, [][]*types.T{tc.typs}, tc.expected, orderedVerifier,
-				func(input []colexecbase.Operator) (colexecbase.Operator, error) {
-					return NewUnorderedDistinct(
-						testAllocator, input[0], tc.distinctCols, tc.typs,
-						numOfBuckets), nil
-				})
-		}
+		log.Infof(context.Background(), "unordered")
+		runTestsWithTyps(t, []tuples{tc.tuples}, [][]*types.T{tc.typs}, tc.expected, orderedVerifier,
+			func(input []colexecbase.Operator) (colexecbase.Operator, error) {
+				return NewUnorderedDistinct(
+					testAllocator, input[0], tc.distinctCols, tc.typs,
+				), nil
+			})
 		if tc.isOrderedOnDistinctCols {
 			for numOrderedCols := 1; numOrderedCols < len(tc.distinctCols); numOrderedCols++ {
 				log.Infof(context.Background(), "partiallyOrdered/ordCols=%d", numOrderedCols)
@@ -224,7 +222,7 @@ func BenchmarkDistinct(b *testing.B) {
 
 	distinctConstructors := []func(*colmem.Allocator, colexecbase.Operator, []uint32, int, []*types.T) (colexecbase.Operator, error){
 		func(allocator *colmem.Allocator, input colexecbase.Operator, distinctCols []uint32, numOrderedCols int, typs []*types.T) (colexecbase.Operator, error) {
-			return NewUnorderedDistinct(allocator, input, distinctCols, typs, HashTableNumBuckets), nil
+			return NewUnorderedDistinct(allocator, input, distinctCols, typs), nil
 		},
 		func(allocator *colmem.Allocator, input colexecbase.Operator, distinctCols []uint32, numOrderedCols int, typs []*types.T) (colexecbase.Operator, error) {
 			return newPartiallyOrderedDistinct(allocator, input, distinctCols, distinctCols[:numOrderedCols], typs)
@@ -243,7 +241,7 @@ func BenchmarkDistinct(b *testing.B) {
 					for i := range typs {
 						typs[i] = types.Int
 					}
-					batch := testAllocator.NewMemBatch(typs)
+					batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 					batch.SetLength(coldata.BatchSize())
 					distinctCols := []uint32{0, 1, 2, 3}[:nCols]
 					// We have the following equation:

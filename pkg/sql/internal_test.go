@@ -22,14 +22,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInternalExecutor(t *testing.T) {
@@ -43,7 +44,7 @@ func TestInternalExecutor(t *testing.T) {
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"SELECT 1")
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +64,7 @@ func TestInternalExecutor(t *testing.T) {
 	// The following statement will succeed on the 2nd try.
 	row, err = ie.QueryRowEx(
 		ctx, "test", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"select case nextval('test.seq') when 1 then crdb_internal.force_retry('1h') else 99 end",
 	)
 	if err != nil {
@@ -86,7 +87,7 @@ func TestInternalExecutor(t *testing.T) {
 		cnt++
 		row, err = ie.QueryRowEx(
 			ctx, "test", txn,
-			sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUser},
 			"select case nextval('test.seq') when 2 then crdb_internal.force_retry('1h') else 99 end",
 		)
 		if err != nil {
@@ -104,6 +105,53 @@ func TestInternalExecutor(t *testing.T) {
 	if cnt != 2 {
 		t.Fatalf("expected 2 iterations, got: %d", cnt)
 	}
+}
+
+func TestInternalFullTableScan(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	params, _ := tests.CreateTestServerParams()
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+
+	_, err := db.Exec("CREATE DATABASE db; SET DATABASE = db;")
+	require.NoError(t, err)
+
+	_, err = db.Exec("CREATE TABLE t(a INT)")
+	require.NoError(t, err)
+
+	_, err = db.Exec("INSERT INTO t VALUES (1), (2), (3)")
+	require.NoError(t, err)
+
+	_, err = db.Exec("SET disallow_full_table_scans = true")
+	require.NoError(t, err)
+
+	_, err = db.Exec("SELECT * FROM t")
+	require.Error(t, err)
+	require.Equal(t,
+		"pq: query `SELECT * FROM t` contains a full table/index scan which is explicitly disallowed",
+		err.Error())
+
+	ie := sql.MakeInternalExecutor(
+		ctx,
+		s.(*server.TestServer).Server.PGServer().SQLServer,
+		sql.MemoryMetrics{},
+		s.ExecutorConfig().(sql.ExecutorConfig).Settings,
+	)
+	ie.SetSessionData(
+		&sessiondata.SessionData{
+			Database:               "db",
+			SequenceState:          &sessiondata.SequenceState{},
+			User:                   security.RootUser,
+			DisallowFullTableScans: true,
+		})
+
+	// Internal queries that perform full table scans shouldn't fail because of
+	// the setting above.
+	_, err = ie.Query(ctx, "full-table-scan-select", nil, "SELECT * FROM db.t")
+	require.NoError(t, err)
 }
 
 func TestQueryIsAdminWithNoTxn(t *testing.T) {
@@ -133,7 +181,7 @@ func TestQueryIsAdminWithNoTxn(t *testing.T) {
 	for _, tc := range testData {
 		t.Run(tc.user, func(t *testing.T) {
 			rows, cols, err := ie.QueryWithCols(ctx, "test", nil, /* txn */
-				sqlbase.InternalExecutorSessionDataOverride{User: tc.user},
+				sessiondata.InternalExecutorOverride{User: tc.user},
 				"SELECT crdb_internal.is_admin()")
 			if err != nil {
 				t.Fatal(err)
@@ -146,6 +194,58 @@ func TestQueryIsAdminWithNoTxn(t *testing.T) {
 				t.Fatalf("expected %q admin %v, got %v", tc.user, tc.expAdmin, isAdmin)
 			}
 		})
+	}
+}
+
+func TestQueryHasRoleOptionWithNoTxn(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	params, _ := tests.CreateTestServerParams()
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+
+	stmts := `
+CREATE USER testuser VIEWACTIVITY;
+CREATE USER testadmin;
+GRANT admin TO testadmin`
+	if _, err := db.Exec(stmts); err != nil {
+		t.Fatal(err)
+	}
+	ie := s.InternalExecutor().(*sql.InternalExecutor)
+
+	for _, tc := range []struct {
+		user        string
+		option      string
+		expected    bool
+		expectedErr string
+	}{
+		{"testuser", roleoption.VIEWACTIVITY.String(), true, ""},
+		{"testuser", roleoption.CREATEROLE.String(), false, ""},
+		{"testuser", "nonexistent", false, "unrecognized role option"},
+		{"testadmin", roleoption.VIEWACTIVITY.String(), true, ""},
+		{"testadmin", roleoption.CREATEROLE.String(), true, ""},
+		{"testadmin", "nonexistent", false, "unrecognized role option"},
+	} {
+		rows, cols, err := ie.QueryWithCols(ctx, "test", nil, /* txn */
+			sessiondata.InternalExecutorOverride{User: tc.user},
+			"SELECT crdb_internal.has_role_option($1)", tc.option)
+		if tc.expectedErr != "" {
+			if !testutils.IsError(err, tc.expectedErr) {
+				t.Fatalf("expected error %q, got %q", tc.expectedErr, err)
+			}
+			continue
+		}
+		if len(rows) != 1 || len(cols) != 1 {
+			t.Fatalf("unexpected result shape %d, %d", len(rows), len(cols))
+		}
+		hasRoleOption := bool(*rows[0][0].(*tree.DBool))
+		if hasRoleOption != tc.expected {
+			t.Fatalf(
+				"expected %q has_role_option('%s') %v, got %v", tc.user, tc.option, tc.expected,
+				hasRoleOption)
+		}
 	}
 }
 
@@ -177,7 +277,7 @@ func TestSessionBoundInternalExecutor(t *testing.T) {
 		})
 
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
-		sqlbase.InternalExecutorSessionDataOverride{},
+		sessiondata.InternalExecutorOverride{},
 		"show database")
 	if err != nil {
 		t.Fatal(err)

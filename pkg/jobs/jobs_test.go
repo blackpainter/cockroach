@@ -26,11 +26,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -44,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/google/go-cmp/cmp"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
@@ -146,16 +148,16 @@ type counters struct {
 }
 
 type registryTestSuite struct {
-	ctx         context.Context
-	oldInterval time.Duration
-	s           serverutils.TestServerInterface
-	outerDB     *gosql.DB
-	sqlDB       *sqlutils.SQLRunner
-	registry    *jobs.Registry
-	done        chan struct{}
-	mockJob     jobs.Record
-	job         *jobs.Job
-	mu          struct {
+	ctx             context.Context
+	cleanupSettings func()
+	s               serverutils.TestServerInterface
+	outerDB         *gosql.DB
+	sqlDB           *sqlutils.SQLRunner
+	registry        *jobs.Registry
+	done            chan struct{}
+	mockJob         jobs.Record
+	job             *jobs.Job
+	mu              struct {
 		syncutil.Mutex
 		a counters
 		e counters
@@ -178,8 +180,7 @@ func noopPauseRequestFunc(
 }
 
 func (rts *registryTestSuite) setUp(t *testing.T) {
-	rts.oldInterval = jobs.DefaultAdoptInterval
-	jobs.DefaultAdoptInterval = time.Millisecond
+	rts.cleanupSettings = jobs.TestingSetAdoptAndCancelIntervals(time.Millisecond, 2*time.Millisecond)
 	rts.ctx = context.Background()
 	rts.s, rts.outerDB, _ = serverutils.StartServer(t, base.TestServerArgs{})
 	rts.sqlDB = sqlutils.MakeSQLRunner(rts.outerDB)
@@ -269,7 +270,7 @@ func (rts *registryTestSuite) tearDown() {
 	close(rts.resumeCheckCh)
 	close(rts.done)
 	rts.s.Stopper().Stop(rts.ctx)
-	jobs.DefaultAdoptInterval = rts.oldInterval
+	rts.cleanupSettings()
 	jobs.ResetConstructors()()
 }
 
@@ -305,6 +306,7 @@ func (rts *registryTestSuite) check(t *testing.T, expectedStatus jobs.Status) {
 func TestRegistryLifecycle(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
 	t.Run("normal success", func(t *testing.T) {
 		rts := registryTestSuite{}
 		rts.setUp(t)
@@ -324,6 +326,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeExit++
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		t.Log("Done")
 	})
 
 	t.Run("create separately success", func(t *testing.T) {
@@ -1179,7 +1182,7 @@ func TestJobLifecycle(t *testing.T) {
 
 	t.Run("bad job details fail", func(t *testing.T) {
 		defer func() {
-			if r, ok := recover().(string); !ok || !strings.Contains(r, "unknown details type int") {
+			if r, ok := recover().(error); !ok || !strings.Contains(r.Error(), "unknown details type int") {
 				t.Fatalf("expected 'unknown details type int', but got: %v", r)
 			}
 		}()
@@ -1388,6 +1391,7 @@ func TestShowJobs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
 	params, _ := tests.CreateTestServerParams()
 	s, rawSQLDB, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(rawSQLDB)
@@ -1566,7 +1570,8 @@ func TestShowAutomaticJobs(t *testing.T) {
 		// system.jobs is part proper SQL columns, part protobuf, so we can't use the
 		// row struct directly.
 		inPayload, err := protoutil.Marshal(&jobspb.Payload{
-			Details: jobspb.WrapPayloadDetails(in.details),
+			Username: security.RootUser,
+			Details:  jobspb.WrapPayloadDetails(in.details),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1777,15 +1782,17 @@ func TestShowJobWhenComplete(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	// Canceling a job relies on adopt daemon to move the job to state
 	// reverting.
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 10 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
+
 	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 	registry := s.JobRegistry().(*jobs.Registry)
-	mockJob := jobs.Record{Details: jobspb.ImportDetails{}, Progress: jobspb.ImportProgress{}}
+	mockJob := jobs.Record{
+		Username: security.RootUser,
+		Details:  jobspb.ImportDetails{},
+		Progress: jobspb.ImportProgress{},
+	}
 	done := make(chan struct{})
 	defer close(done)
 	jobs.RegisterConstructor(
@@ -1912,10 +1919,8 @@ func TestJobInTxn(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	defer jobs.ResetConstructors()()
 
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 5 * time.Second
+	// Set the adoption interval to be very long to test the adoption channel.
+	defer jobs.TestingSetAdoptAndCancelIntervals(time.Hour, time.Hour)()
 
 	ctx := context.Background()
 	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
@@ -1929,7 +1934,7 @@ func TestJobInTxn(t *testing.T) {
 	// Piggy back on BACKUP to be able to create a succeeding test job.
 	sql.AddPlanHook(
 		func(_ context.Context, stmt tree.Statement, phs sql.PlanHookState,
-		) (sql.PlanHookRowFn, sqlbase.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
 			st, ok := stmt.(*tree.Backup)
 			if !ok {
 				return nil, nil, nil, false, nil
@@ -1964,7 +1969,7 @@ func TestJobInTxn(t *testing.T) {
 	// Piggy back on RESTORE to be able to create a failing test job.
 	sql.AddPlanHook(
 		func(_ context.Context, stmt tree.Statement, phs sql.PlanHookState,
-		) (sql.PlanHookRowFn, sqlbase.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
 			_, ok := stmt.(*tree.Restore)
 			if !ok {
 				return nil, nil, nil, false, nil
@@ -2267,10 +2272,7 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	defer jobs.ResetConstructors()()
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 10 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
 
 	ctx := context.Background()
 
@@ -2288,6 +2290,7 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 	}
 
 	t.Run("job is not adopted", func(t *testing.T) {
+		defer jobs.ResetConstructors()()
 		resuming := make(chan struct{})
 		jobs.RegisterConstructor(jobspb.TypeSchemaChange, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 			return jobs.FakeResumer{
@@ -2300,9 +2303,10 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 		select {
 		case <-resuming:
 			t.Fatal("job was resumed")
-		case <-time.After(time.Second):
-			// With an adopt interval of 10 ms, within 1 s we can be reasonably sure
-			// that the job was not adopted.
+		case <-time.After(100 * time.Millisecond):
+			// With an adopt interval of 10 ms, within 100ms we can be reasonably sure
+			// that the job was not adopted. At the very least, the test would be
+			// flakey.
 		}
 	})
 
@@ -2325,4 +2329,57 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestRegistryTestingNudgeAdoptionQueue(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	defer jobs.ResetConstructors()()
+
+	ctx := context.Background()
+
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	registry := s.JobRegistry().(*jobs.Registry)
+
+	// The default FormatVersion value in SchemaChangeDetails corresponds to a
+	// pre-20.1 job.
+	rec := jobs.Record{
+		DescriptorIDs: []descpb.ID{1},
+		Details:       jobspb.BackupDetails{},
+		Progress:      jobspb.BackupProgress{},
+	}
+
+	defer jobs.ResetConstructors()()
+	resuming := make(chan struct{})
+	jobs.RegisterConstructor(jobspb.TypeBackup, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		return jobs.FakeResumer{
+			OnResume: func(ctx context.Context, _ chan<- tree.Datums) error {
+				resuming <- struct{}{}
+				return nil
+			},
+		}
+	})
+
+	_, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+	require.NoError(t, err)
+	registry.TestingNudgeAdoptionQueue()
+	// We want the job to be resumed very rapidly. We set this long timeout of 2s
+	// to deal with extremely slow stressrace. The adoption interval is still
+	// much larger than this so this should be a sufficient test.
+	const aLongTime = 5 * time.Second
+	select {
+	case <-resuming:
+	case <-time.After(aLongTime):
+		t.Fatal("job was not adopted")
+	}
+}
+
+func TestStatusSafeFormatter(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	redacted := string(redact.Sprint(jobs.StatusCanceled).Redact())
+	expected := string(jobs.StatusCanceled)
+	require.Equal(t, expected, redacted)
 }

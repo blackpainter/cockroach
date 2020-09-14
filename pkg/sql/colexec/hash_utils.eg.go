@@ -11,7 +11,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"reflect"
 	"unsafe"
@@ -20,8 +19,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // rehash takes an element of a key (tuple representing a row of equality
@@ -35,7 +35,7 @@ func rehash(
 	sel []int,
 	cancelChecker CancelChecker,
 	overloadHelper overloadHelper,
-	datumAlloc *sqlbase.DatumAlloc,
+	datumAlloc *rowenc.DatumAlloc,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
 	// "_overloadHelper" local variable of type "overloadHelper".
@@ -908,6 +908,6 @@ func rehash(
 			}
 		}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", col.Type()))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", col.Type()))
 	}
 }

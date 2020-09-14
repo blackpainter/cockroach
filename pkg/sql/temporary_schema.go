@@ -25,13 +25,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -89,7 +91,7 @@ func (p *planner) getOrCreateTemporarySchema(
 	ctx context.Context, dbID descpb.ID,
 ) (descpb.ID, error) {
 	tempSchemaName := p.TemporarySchemaName()
-	sKey := sqlbase.NewSchemaKey(dbID, tempSchemaName)
+	sKey := catalogkeys.NewSchemaKey(dbID, tempSchemaName)
 	schemaID, err := catalogkv.GetDescriptorID(ctx, p.txn, p.ExecCfg().Codec, sKey)
 	if err != nil {
 		return 0, err
@@ -103,6 +105,7 @@ func (p *planner) getOrCreateTemporarySchema(
 			return descpb.InvalidID, err
 		}
 		p.sessionDataMutator.SetTemporarySchemaName(sKey.Name())
+		p.sessionDataMutator.SetTemporarySchemaID(uint32(id))
 		return id, nil
 	}
 	return schemaID, nil
@@ -152,7 +155,7 @@ func temporarySchemaSessionID(scName string) (bool, ClusterWideID, error) {
 // temporary schema of the given dbID.
 func getTemporaryObjectNames(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID, tempSchemaName string,
-) (TableNames, error) {
+) (tree.TableNames, error) {
 	dbDesc, err := catalogkv.MustGetDatabaseDescByID(ctx, txn, codec, dbID)
 	if err != nil {
 		return nil, err
@@ -227,7 +230,7 @@ func cleanupSchemaObjects(
 	a := catalogkv.UncachedPhysicalAccessor{}
 
 	searchPath := catconstants.DefaultSearchPath.WithTemporarySchemaName(schemaName)
-	override := sqlbase.InternalExecutorSessionDataOverride{
+	override := sessiondata.InternalExecutorOverride{
 		SearchPath: &searchPath,
 		User:       security.RootUser,
 	}
@@ -237,7 +240,7 @@ func cleanupSchemaObjects(
 	var views descpb.IDs
 	var sequences descpb.IDs
 
-	descsByID := make(map[descpb.ID]*TableDescriptor, len(tbNames))
+	tblDescsByID := make(map[descpb.ID]catalog.TableDescriptor, len(tbNames))
 	tblNamesByID := make(map[descpb.ID]tree.TableName, len(tbNames))
 	for _, tbName := range tbNames {
 		objDesc, err := a.GetObjectDesc(
@@ -255,9 +258,9 @@ func cleanupSchemaObjects(
 		}
 		// TODO(ajwerner): Deal with temporary types or ensure that they cannot
 		// exist.
-		desc := objDesc.(*ImmutableTableDescriptor)
+		desc := objDesc.(*tabledesc.Immutable)
 
-		descsByID[desc.ID] = desc.TableDesc()
+		tblDescsByID[desc.ID] = desc
 		tblNamesByID[desc.ID] = tbName
 
 		if desc.SequenceOpts != nil {
@@ -287,14 +290,14 @@ func cleanupSchemaObjects(
 			"SEQUENCE",
 			sequences,
 			func(id descpb.ID) error {
-				desc := descsByID[id]
+				desc := tblDescsByID[id]
 				// For any dependent tables, we need to drop the sequence dependencies.
 				// This can happen if a permanent table references a temporary table.
-				for _, d := range desc.DependedOnBy {
+				return desc.ForeachDependedOnBy(func(d *descpb.TableDescriptor_Reference) error {
 					// We have already cleaned out anything we are depended on if we've seen
 					// the descriptor already.
-					if _, ok := descsByID[d.ID]; ok {
-						continue
+					if _, ok := tblDescsByID[d.ID]; ok {
+						return nil
 					}
 					dTableDesc, err := catalogkv.MustGetTableDescByID(ctx, txn, codec, d.ID)
 					if err != nil {
@@ -341,8 +344,8 @@ func cleanupSchemaObjects(
 							}
 						}
 					}
-				}
-				return nil
+					return nil
+				})
 			},
 		},
 	} {
@@ -388,8 +391,8 @@ type TemporaryObjectCleaner struct {
 	db                               *kv.DB
 	codec                            keys.SQLCodec
 	makeSessionBoundInternalExecutor sqlutil.SessionBoundInternalExecutorFactory
-	// statusServer gives access to the Status service.
-	statusServer           serverpb.OptionalStatusServer
+	// statusServer gives access to the SQLStatus service.
+	statusServer           serverpb.SQLStatusServer
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc
 	testingKnobs           ExecutorTestingKnobs
 	metrics                *temporaryObjectCleanerMetrics
@@ -416,7 +419,7 @@ func NewTemporaryObjectCleaner(
 	codec keys.SQLCodec,
 	registry *metric.Registry,
 	makeSessionBoundInternalExecutor sqlutil.SessionBoundInternalExecutorFactory,
-	statusServer serverpb.OptionalStatusServer,
+	statusServer serverpb.SQLStatusServer,
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc,
 	testingKnobs ExecutorTestingKnobs,
 ) *TemporaryObjectCleaner {
@@ -526,16 +529,11 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 		return nil
 	}
 
-	statusServer, err := c.statusServer.OptionalErr(47894)
-	if err != nil {
-		return err
-	}
-
 	// Get active sessions.
 	var response *serverpb.ListSessionsResponse
 	if err := retryFunc(ctx, func() error {
 		var err error
-		response, err = statusServer.ListSessions(
+		response, err = c.statusServer.ListSessions(
 			ctx,
 			&serverpb.ListSessionsRequest{},
 		)

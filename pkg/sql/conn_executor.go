@@ -13,6 +13,7 @@ package sql
 import (
 	"context"
 	"fmt"
+	"hash"
 	"io"
 	"math"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -28,17 +30,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/database"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
@@ -50,7 +55,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"golang.org/x/net/trace"
@@ -326,7 +330,10 @@ func makeMetrics(internal bool) Metrics {
 
 // Start starts the Server's background processing.
 func (s *Server) Start(ctx context.Context, stopper *stop.Stopper) {
-	if s.cfg.Codec.ForSystemTenant() {
+	// TODO (lucy): If this node was started on some previous cluster version,
+	// figure out a way to stop listening to gossip updates for the old database
+	// cache after all transactions are guaranteed to not be using it.
+	if !s.cfg.Settings.Version.IsActive(ctx, clusterversion.VersionLeasedDatabaseDescriptors) {
 		gossipUpdateC := s.cfg.SystemConfig.RegisterSystemConfigChannel()
 		stopper.RunWorker(ctx, func(ctx context.Context) {
 			for {
@@ -377,6 +384,13 @@ var _ = (*Server).GetScrubbedStmtStats
 // identifiers (e.g. table and column names) aren't scrubbed from the statements.
 func (s *Server) GetUnscrubbedStmtStats() []roachpb.CollectedStatementStatistics {
 	return s.sqlStats.getUnscrubbedStmtStats(s.cfg.VirtualSchemas)
+}
+
+// GetUnscrubbedTxnStats returns the same transaction statistics by app, with
+// the queries scrubbed of their identifiers. Any statement which cannot be
+// scrubbed will be omitted from the returned map.
+func (s *Server) GetUnscrubbedTxnStats() []roachpb.CollectedTransactionStatistics {
+	return s.sqlStats.getUnscrubbedTxnStats()
 }
 
 // GetScrubbedReportingStats does the same thing as GetScrubbedStmtStats but
@@ -602,7 +616,7 @@ func (s *Server) newConnExecutor(
 			settings: s.cfg.Settings,
 		},
 		memMetrics: memMetrics,
-		planner:    planner{execCfg: s.cfg, alloc: &sqlbase.DatumAlloc{}},
+		planner:    planner{execCfg: s.cfg, alloc: &rowenc.DatumAlloc{}},
 
 		// ctxHolder will be reset at the start of run(). We only define
 		// it here so that an early call to close() doesn't panic.
@@ -641,8 +655,8 @@ func (s *Server) newConnExecutor(
 		portals:   make(map[string]PreparedPortal),
 	}
 	ex.extraTxnState.prepStmtsNamespaceMemAcc = ex.sessionMon.MakeBoundAccount()
-	ex.extraTxnState.descCollection = descs.MakeCollection(s.cfg.LeaseManager,
-		s.cfg.Settings, s.dbCache.getDatabaseCache(), s.dbCache)
+	ex.extraTxnState.descCollection = descs.MakeCollection(ctx, s.cfg.LeaseManager,
+		s.cfg.Settings, s.dbCache.getDatabaseCache(), s.dbCache, sd, s.cfg.HydratedTables)
 	ex.extraTxnState.txnRewindPos = -1
 	ex.extraTxnState.schemaChangeJobsCache = make(map[descpb.ID]*jobs.Job)
 	ex.mu.ActiveQueries = make(map[ClusterWideID]*queryMeta)
@@ -880,6 +894,7 @@ func (ex *connExecutor) close(ctx context.Context, closeType closeType) {
 	// Stop idle timer if the connExecutor is closed to ensure cancel session
 	// is not called.
 	ex.mu.IdleInSessionTimeout.Stop()
+	ex.mu.IdleInTransactionSessionTimeout.Stop()
 
 	if closeType != panicClose {
 		ex.state.mon.Stop(ctx)
@@ -969,6 +984,11 @@ type connExecutor struct {
 		// executed so far.
 		numDDL int
 
+		// numRows keeps track of the number of rows that have been observed by this
+		// transaction. This is simply the summation of number of rows observed by
+		// comprising statements.
+		numRows int
+
 		// txnRewindPos is the position within stmtBuf to which we'll rewind when
 		// performing automatic retries. This is more or less the position where the
 		// current transaction started.
@@ -1009,12 +1029,31 @@ type connExecutor struct {
 		// unset when txn is executed within another higher-level txn.
 		onTxnFinish func(txnEvent)
 
+		// onTxnRestart (if non-nil) will be called when a txn is being retried. It
+		// is set when the txn is started but can remain unset when a txn is
+		// executed within another higher-level txn.
+		onTxnRestart func()
+
 		// savepoints maintains the stack of savepoints currently open.
 		savepoints savepointStack
 		// savepointsAtTxnRewindPos is a snapshot of the savepoints stack before
 		// processing the command at position txnRewindPos. When rewinding, we're
 		// going to restore this snapshot.
 		savepointsAtTxnRewindPos savepointStack
+
+		// transactionStatementIDs tracks all statement IDs that make up the current
+		// transaction. It's length is bound by the TxnStatsNumStmtIDsToRecord
+		// cluster setting.
+		transactionStatementIDs []roachpb.StmtID
+
+		// transactionStatementsHash is the hashed accumulation of all statementIDs
+		// that comprise the transaction. It is used to construct the key when
+		// recording transaction statistics. It's important to accumulate this hash
+		// as we go along in addition to the transactionStatementIDs as
+		// transactionStatementIDs are capped to prevent unbound expansion, but we
+		// still need the statementID hash to disambiguate beyond the capped
+		// statements.
+		transactionStatementsHash hash.Hash
 	}
 
 	// sessionData contains the user-configurable connection variables.
@@ -1023,7 +1062,7 @@ type connExecutor struct {
 	// statements that manipulate session state to an internal executor.
 	dataMutator *sessionDataMutator
 	// appStats tracks per-application SQL usage statistics. It is maintained to
-	// represent statistrics for the application currently identified by
+	// represent statistics for the application currently identified by
 	// sessiondata.ApplicationName.
 	appStats *appStats
 	// applicationName is the same as sessionData.ApplicationName. It's copied
@@ -1073,6 +1112,11 @@ type connExecutor struct {
 		// IdleInSessionTimeout is returned by the AfterFunc call that cancels the
 		// session if the idle time exceeds the idle_in_session_timeout.
 		IdleInSessionTimeout timeout
+
+		// IdleInTransactionSessionTimeout is returned by the AfterFunc call that
+		// cancels the session if the idle time in a transaction exceeds the
+		// idle_in_transaction_session_timeout.
+		IdleInTransactionSessionTimeout timeout
 	}
 
 	// curStmt is the statement that's currently being prepared or executed, if
@@ -1204,7 +1248,6 @@ func (ex *connExecutor) resetExtraTxnState(
 	}
 
 	ex.extraTxnState.descCollection.ReleaseAll(ctx)
-
 	ex.extraTxnState.descCollection.ResetDatabaseCache(dbCacheHolder.getDatabaseCache())
 
 	// Close all portals.
@@ -1221,6 +1264,13 @@ func (ex *connExecutor) resetExtraTxnState(
 			ex.extraTxnState.onTxnFinish(ev)
 			ex.extraTxnState.onTxnFinish = nil
 		}
+	case txnRestart:
+		if ex.extraTxnState.onTxnRestart != nil {
+			ex.extraTxnState.onTxnRestart()
+		}
+		ex.state.mu.Lock()
+		defer ex.state.mu.Unlock()
+		ex.state.mu.stmtCount = 0
 	}
 	// NOTE: on txnRestart we don't need to muck with the savepoints stack. It's either a
 	// a ROLLBACK TO SAVEPOINT that generated the event, and that statement deals with the
@@ -1778,7 +1828,7 @@ func (ex *connExecutor) execCopyIn(
 	if !isNoTxn && !isOpen {
 		ev := eventNonRetriableErr{IsCommit: fsm.False}
 		payload := eventNonRetriableErrPayload{
-			err: sqlbase.NewTransactionAbortedError("" /* customMsg */)}
+			err: sqlerrors.NewTransactionAbortedError("" /* customMsg */)}
 		return ev, payload, nil
 	}
 
@@ -2044,11 +2094,13 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 			ReCache:            ex.server.reCache,
 			InternalExecutor:   &ie,
 			DB:                 ex.server.cfg.DB,
+			SQLLivenessReader:  ex.server.cfg.SQLLivenessReader,
 		},
 		SessionMutator:       ex.dataMutator,
 		VirtualSchemas:       ex.server.cfg.VirtualSchemas,
 		Tracing:              &ex.sessionTracing,
-		StatusServer:         ex.server.cfg.StatusServer,
+		NodesStatusServer:    ex.server.cfg.NodesStatusServer,
+		SQLStatusServer:      ex.server.cfg.SQLStatusServer,
 		MemMetrics:           &ex.memMetrics,
 		Descs:                &ex.extraTxnState.descCollection,
 		ExecCfg:              ex.server.cfg,
@@ -2104,7 +2156,7 @@ func (ex *connExecutor) implicitTxn() bool {
 // initPlanner initializes a planner so it can can be used for planning a
 // query in the context of this session.
 func (ex *connExecutor) initPlanner(ctx context.Context, p *planner) {
-	p.cancelChecker = sqlbase.NewCancelChecker(ctx)
+	p.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 
 	ex.initEvalCtx(ctx, &p.extendedEvalCtx, p)
 
@@ -2172,7 +2224,7 @@ func (ex *connExecutor) txnStateTransitionsApplyWrapper(
 	case noEvent:
 	case txnStart:
 		ex.extraTxnState.autoRetryCounter = 0
-		ex.extraTxnState.onTxnFinish = ex.recordTransactionStart()
+		ex.extraTxnState.onTxnFinish, ex.extraTxnState.onTxnRestart = ex.recordTransactionStart()
 	case txnCommit:
 		if res.Err() != nil {
 			err := errorutil.UnexpectedWithIssueErrorf(
@@ -2231,7 +2283,7 @@ func (ex *connExecutor) txnStateTransitionsApplyWrapper(
 		}
 
 		// Wait for the cache to reflect the dropped databases if any.
-		ex.extraTxnState.descCollection.WaitForCacheToDropDatabases(ex.Ctx())
+		ex.extraTxnState.descCollection.WaitForCacheToDropDatabasesDeprecated(ex.Ctx())
 
 		fallthrough
 	case txnRestart, txnRollback:
@@ -2253,7 +2305,7 @@ func (ex *connExecutor) txnStateTransitionsApplyWrapper(
 //
 // If an error is returned, it is to be considered a query execution error.
 func (ex *connExecutor) initStatementResult(
-	ctx context.Context, res RestrictedCommandResult, stmt *Statement, cols sqlbase.ResultColumns,
+	ctx context.Context, res RestrictedCommandResult, stmt *Statement, cols colinfo.ResultColumns,
 ) error {
 	for _, c := range cols {
 		if err := checkResultType(c.Typ); err != nil {
@@ -2305,16 +2357,23 @@ func (ex *connExecutor) serialize() serverpb.Session {
 	ex.state.mu.RLock()
 	defer ex.state.mu.RUnlock()
 
-	var kvTxnID *uuid.UUID
 	var activeTxnInfo *serverpb.TxnInfo
 	txn := ex.state.mu.txn
 	if txn != nil {
 		id := txn.ID()
-		kvTxnID = &id
 		activeTxnInfo = &serverpb.TxnInfo{
-			ID:             id,
-			Start:          ex.state.mu.txnStart,
-			TxnDescription: txn.String(),
+			ID:                    id,
+			Start:                 ex.state.mu.txnStart,
+			NumStatementsExecuted: int32(ex.state.mu.stmtCount),
+			NumRetries:            int32(txn.Epoch()),
+			NumAutoRetries:        int32(ex.extraTxnState.autoRetryCounter),
+			TxnDescription:        txn.String(),
+			Implicit:              ex.implicitTxn(),
+			AllocBytes:            ex.state.mon.AllocBytes(),
+			MaxAllocBytes:         ex.state.mon.MaximumBytes(),
+			IsHistorical:          ex.state.isHistorical,
+			ReadOnly:              ex.state.readOnly,
+			Priority:              ex.state.priority.String(),
 		}
 	}
 
@@ -2338,21 +2397,29 @@ func (ex *connExecutor) serialize() serverpb.Session {
 		if query.hidden {
 			continue
 		}
-		sql := truncateSQL(query.getStatement())
+		ast, err := query.getStatement()
+		if err != nil {
+			continue
+		}
+		anonSQL := truncateSQL(anonymizeStmt(ast))
+		sql := truncateSQL(ast.String())
 		progress := math.Float64frombits(atomic.LoadUint64(&query.progressAtomic))
 		activeQueries = append(activeQueries, serverpb.ActiveQuery{
 			TxnID:         query.txnID,
 			ID:            id.String(),
 			Start:         query.start.UTC(),
 			Sql:           sql,
+			SqlAnon:       anonSQL,
 			IsDistributed: query.isDistributed,
 			Phase:         (serverpb.ActiveQuery_Phase)(query.phase),
 			Progress:      float32(progress),
 		})
 	}
 	lastActiveQuery := ""
+	lastActiveQueryAnon := ""
 	if ex.mu.LastActiveQuery != nil {
 		lastActiveQuery = truncateSQL(ex.mu.LastActiveQuery.String())
+		lastActiveQueryAnon = truncateSQL(anonymizeStmt(ex.mu.LastActiveQuery))
 	}
 
 	remoteStr := "<admin>"
@@ -2367,11 +2434,12 @@ func (ex *connExecutor) serialize() serverpb.Session {
 		Start:           ex.phaseTimes[sessionInit].UTC(),
 		ActiveQueries:   activeQueries,
 		ActiveTxn:       activeTxnInfo,
-		KvTxnID:         kvTxnID,
 		LastActiveQuery: lastActiveQuery,
 		ID:              ex.sessionID.GetBytes(),
 		AllocBytes:      ex.mon.AllocBytes(),
 		MaxAllocBytes:   ex.mon.MaximumBytes(),
+
+		LastActiveQueryAnon: lastActiveQueryAnon,
 	}
 }
 

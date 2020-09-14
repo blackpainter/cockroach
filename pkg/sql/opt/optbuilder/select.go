@@ -12,6 +12,7 @@ package optbuilder
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -21,16 +22,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
-)
-
-const (
-	excludeMutations = false
-	includeMutations = true
 )
 
 // buildDataSource builds a set of memo groups that represent the given table
@@ -116,7 +111,15 @@ func (b *Builder) buildDataSource(
 		switch t := ds.(type) {
 		case cat.Table:
 			tabMeta := b.addTable(t, &resName)
-			return b.buildScan(tabMeta, nil /* ordinals */, indexFlags, locking, excludeMutations, inScope)
+			return b.buildScan(
+				tabMeta,
+				tableOrdinals(t, columnKinds{
+					includeMutations: false,
+					includeSystem:    true,
+					includeVirtual:   false,
+				}),
+				indexFlags, locking, inScope,
+			)
 
 		case cat.Sequence:
 			return b.buildSequenceSelect(t, &resName, inScope)
@@ -392,11 +395,17 @@ func (b *Builder) buildScanFromTableRef(
 				"an explicit list of column IDs must include at least one column"))
 		}
 		ordinals = resolveNumericColumnRefs(tab, ref.Columns)
+	} else {
+		ordinals = tableOrdinals(tab, columnKinds{
+			includeMutations: false,
+			includeSystem:    true,
+			includeVirtual:   false,
+		})
 	}
 
 	tn := tree.MakeUnqualifiedTableName(tab.Name())
 	tabMeta := b.addTable(tab, &tn)
-	return b.buildScan(tabMeta, ordinals, indexFlags, locking, excludeMutations, inScope)
+	return b.buildScan(tabMeta, ordinals, indexFlags, locking, inScope)
 }
 
 // addTable adds a table to the metadata and returns the TableMeta. The table
@@ -410,9 +419,7 @@ func (b *Builder) addTable(tab cat.Table, alias *tree.TableName) *opt.TableMeta 
 
 // buildScan builds a memo group for a ScanOp expression on the given table.
 //
-// If the ordinals slice is not nil, then only columns with ordinals in that
-// list are projected by the scan. Otherwise, all columns from the table are
-// projected.
+// The scan projects the given table ordinals.
 //
 // If scanMutationCols is true, then include columns being added or dropped from
 // the table. These are currently required by the execution engine as "fetch
@@ -430,9 +437,11 @@ func (b *Builder) buildScan(
 	ordinals []int,
 	indexFlags *tree.IndexFlags,
 	locking lockingSpec,
-	scanMutationCols bool,
 	inScope *scope,
 ) (outScope *scope) {
+	if ordinals == nil {
+		panic(errors.AssertionFailedf("no ordinals"))
+	}
 	tab := tabMeta.Table
 	tabID := tabMeta.MetaID
 
@@ -441,38 +450,24 @@ func (b *Builder) buildScan(
 	}
 
 	outScope = inScope.push()
+
 	var tabColIDs opt.ColSet
-	addCol := func(ord int) {
+	outScope.cols = make([]scopeColumn, len(ordinals))
+	for i, ord := range ordinals {
 		col := tab.Column(ord)
 		colID := tabID.ColumnID(ord)
 		tabColIDs.Add(colID)
 		name := col.ColName()
-		isMutation := cat.IsMutationColumn(tab, ord)
-		outScope.cols = append(outScope.cols, scopeColumn{
-			id:       colID,
-			name:     name,
-			table:    tabMeta.Alias,
-			typ:      col.DatumType(),
-			hidden:   col.IsHidden() || isMutation,
-			mutation: isMutation,
-			system:   cat.IsSystemColumn(tab, ord),
-		})
-	}
-
-	if ordinals == nil {
-		// If no ordinals are requested, then add in all of the table columns
-		// (including mutation columns if scanMutationCols is true).
-		outScope.cols = make([]scopeColumn, 0, tab.ColumnCount())
-		for i, n := 0, tab.ColumnCount(); i < n; i++ {
-			if scanMutationCols || !cat.IsMutationColumn(tab, i) {
-				addCol(i)
-			}
-		}
-	} else {
-		// Otherwise, just add the ordinals.
-		outScope.cols = make([]scopeColumn, 0, len(ordinals))
-		for _, ord := range ordinals {
-			addCol(ord)
+		kind := col.Kind()
+		outScope.cols[i] = scopeColumn{
+			id:           colID,
+			name:         name,
+			table:        tabMeta.Alias,
+			typ:          col.DatumType(),
+			hidden:       col.IsHidden() || kind != cat.Ordinary,
+			kind:         kind,
+			mutation:     kind == cat.WriteOnly || kind == cat.DeleteOnly,
+			tableOrdinal: ord,
 		}
 	}
 
@@ -532,11 +527,7 @@ func (b *Builder) buildScan(
 			// We will track the ColumnID to Ord mapping so Ords can be added
 			// when a column is referenced.
 			for i, col := range outScope.cols {
-				if ordinals == nil {
-					dep.ColumnIDToOrd[col.id] = i
-				} else {
-					dep.ColumnIDToOrd[col.id] = ordinals[i]
-				}
+				dep.ColumnIDToOrd[col.id] = ordinals[i]
 			}
 			if private.Flags.ForceIndex {
 				dep.SpecificIndex = true
@@ -578,8 +569,8 @@ func (b *Builder) addCheckConstraintsForTable(tabMeta *opt.TableMeta) {
 	// Find the non-nullable table columns. Mutation columns can be NULL during
 	// backfill, so they should be excluded.
 	var notNullCols opt.ColSet
-	for i := 0; i < tab.ColumnCount(); i++ {
-		if !tab.Column(i).IsNullable() && !cat.IsMutationColumn(tab, i) {
+	for i, n := 0, tab.ColumnCount(); i < n; i++ {
+		if col := tab.Column(i); !col.IsNullable() && !col.IsMutation() {
 			notNullCols.Add(tabMeta.MetaID.ColumnID(i))
 		}
 	}
@@ -632,7 +623,7 @@ func (b *Builder) addComputedColsForTable(tabMeta *opt.TableMeta) {
 		if !tabCol.IsComputed() {
 			continue
 		}
-		if cat.IsMutationColumn(tab, i) {
+		if tabCol.IsMutation() {
 			// Mutation columns can be NULL during backfill, so they won't equal the
 			// computed column expression value (in general).
 			continue
@@ -707,29 +698,10 @@ func (b *Builder) addPartialIndexPredicatesForTable(tabMeta *opt.TableMeta) {
 			panic(err)
 		}
 
-		texpr := tableScope.resolveAndRequireType(expr, types.Bool)
-
-		var scalar opt.ScalarExpr
-		b.factory.FoldingControl().TemporarilyDisallowStableFolds(func() {
-			scalar = b.buildScalar(texpr, tableScope, nil, nil, nil)
-		})
-
-		// Wrap the scalar in a FiltersItem.
-		filter := b.factory.ConstructFiltersItem(scalar)
-
-		// Expressions with non-immutable operators are not supported as partial
-		// index predicates.
-		if filter.ScalarProps().VolatilitySet.HasStable() || filter.ScalarProps().VolatilitySet.HasVolatile() {
-			panic(errors.AssertionFailedf("partial index predicate is not immutable"))
-		}
-
-		// Wrap the predicate filter expression in a FiltersExpr and normalize
-		// it.
-		filters := memo.FiltersExpr{filter}
-		filters = b.factory.NormalizePartialIndexPredicate(filters)
-
-		// Add the filters to the table metadata.
-		tabMeta.AddPartialIndexPredicate(indexOrd, &filters)
+		// Build the partial index predicate as a memo.FiltersExpr and add it
+		// to the table metadata.
+		predExpr := b.buildPartialIndexPredicate(tableScope, expr)
+		tabMeta.AddPartialIndexPredicate(indexOrd, &predExpr)
 	}
 }
 
@@ -739,9 +711,9 @@ func (b *Builder) buildSequenceSelect(
 	md := b.factory.Metadata()
 	outScope = inScope.push()
 
-	cols := make(opt.ColList, len(sqlbase.SequenceSelectColumns))
+	cols := make(opt.ColList, len(colinfo.SequenceSelectColumns))
 
-	for i, c := range sqlbase.SequenceSelectColumns {
+	for i, c := range colinfo.SequenceSelectColumns {
 		cols[i] = md.AddColumn(c.Name, c.Typ)
 	}
 
@@ -1366,13 +1338,12 @@ func (b *Builder) validateLockingInFrom(
 		// Validating locking wait policy.
 		switch li.WaitPolicy {
 		case tree.LockWaitBlock:
-			// Default.
+			// Default. Block on conflicting locks.
 		case tree.LockWaitSkip:
 			panic(unimplementedWithIssueDetailf(40476, "",
 				"SKIP LOCKED lock wait policy is not supported"))
 		case tree.LockWaitError:
-			panic(unimplementedWithIssueDetailf(40476, "",
-				"NOWAIT lock wait policy is not supported"))
+			// Raise an error on conflicting locks.
 		default:
 			panic(errors.AssertionFailedf("unknown locking wait policy: %s", li.WaitPolicy))
 		}

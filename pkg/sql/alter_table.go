@@ -20,15 +20,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -39,11 +42,12 @@ import (
 
 type alterTableNode struct {
 	n         *tree.AlterTable
-	tableDesc *MutableTableDescriptor
+	tableDesc *tabledesc.Mutable
 	// statsData is populated with data for "alter table inject statistics"
 	// commands - the JSON stats expressions.
 	// It is parallel with n.Cmds (for the inject stats commands).
-	statsData map[int]tree.TypedExpr
+	statsData    map[int]tree.TypedExpr
+	hasOwnership bool
 }
 
 // AlterTable applies a schema change on a table.
@@ -69,8 +73,18 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 		return newZeroNode(nil /* columns */), nil
 	}
 
-	if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
+	hasOwnership, err := p.HasOwnership(ctx, tableDesc)
+	if err != nil {
 		return nil, err
+	}
+
+	if !hasOwnership {
+		// This check for CREATE privilege is kept for backwards compatibility.
+		if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
+			return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
+				"must be owner of table %s or have CREATE privilege on table %s",
+				tree.Name(tableDesc.GetName()), tree.Name(tableDesc.GetName()))
+		}
 	}
 
 	n.HoistAddColumnConstraints()
@@ -96,9 +110,10 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 	}
 
 	return &alterTableNode{
-		n:         n,
-		tableDesc: tableDesc,
-		statsData: statsData,
+		n:            n,
+		tableDesc:    tableDesc,
+		statsData:    statsData,
+		hasOwnership: hasOwnership,
 	}, nil
 }
 
@@ -209,7 +224,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 			case *tree.CheckConstraintTableDef:
 				var err error
 				params.p.runWithOptions(resolveFlags{contextDatabaseID: n.tableDesc.ParentID}, func() {
-					info, infoErr := n.tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+					info, infoErr := n.tableDesc.GetConstraintInfo(params.ctx, nil)
 					if err != nil {
 						err = infoErr
 						return
@@ -245,7 +260,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 						return err
 					}
 				}
-				affected := make(map[descpb.ID]*sqlbase.MutableTableDescriptor)
+				affected := make(map[descpb.ID]*tabledesc.Mutable)
 
 				// If there are any FKs, we will need to update the table descriptor of the
 				// depended-on table (to register this table against its DependedOnBy field).
@@ -388,6 +403,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return pgerror.Newf(pgcode.InvalidColumnReference,
 					"column %q is referenced by the primary key", colToDrop.Name)
 			}
+			var idxNamesToDelete []string
 			for _, idx := range n.tableDesc.AllNonDropIndexes() {
 				// We automatically drop indexes that reference the column
 				// being dropped.
@@ -451,15 +467,19 @@ func (n *alterTableNode) startExec(params runParams) error {
 
 				// Perform the DROP.
 				if containsThisColumn {
-					jobDesc := fmt.Sprintf("removing index %q dependent on column %q which is being"+
-						" dropped; full details: %s", idx.Name, colToDrop.ColName(),
-						tree.AsStringWithFQNames(n.n, params.Ann()))
-					if err := params.p.dropIndexByName(
-						params.ctx, tn, tree.UnrestrictedName(idx.Name), n.tableDesc, false,
-						t.DropBehavior, ignoreIdxConstraint, jobDesc,
-					); err != nil {
-						return err
-					}
+					idxNamesToDelete = append(idxNamesToDelete, idx.Name)
+				}
+			}
+
+			for _, idxName := range idxNamesToDelete {
+				jobDesc := fmt.Sprintf("removing index %q dependent on column %q which is being"+
+					" dropped; full details: %s", idxName, colToDrop.ColName(),
+					tree.AsStringWithFQNames(n.n, params.Ann()))
+				if err := params.p.dropIndexByName(
+					params.ctx, tn, tree.UnrestrictedName(idxName), n.tableDesc, false,
+					t.DropBehavior, ignoreIdxConstraint, jobDesc,
+				); err != nil {
+					return err
 				}
 			}
 
@@ -525,12 +545,14 @@ func (n *alterTableNode) startExec(params runParams) error {
 				return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 					"column %q in the middle of being added, try again later", t.Column)
 			}
-			if err := n.tableDesc.Validate(params.ctx, params.p.txn, params.ExecCfg().Codec); err != nil {
+			if err := n.tableDesc.Validate(
+				params.ctx, catalogkv.NewOneLevelUncachedDescGetter(params.p.Txn(), params.ExecCfg().Codec),
+			); err != nil {
 				return err
 			}
 
 		case *tree.AlterTableDropConstraint:
-			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)
 			if err != nil {
 				return err
 			}
@@ -546,18 +568,20 @@ func (n *alterTableNode) startExec(params runParams) error {
 			if err := n.tableDesc.DropConstraint(
 				params.ctx,
 				name, details,
-				func(desc *sqlbase.MutableTableDescriptor, ref *descpb.ForeignKeyConstraint) error {
+				func(desc *tabledesc.Mutable, ref *descpb.ForeignKeyConstraint) error {
 					return params.p.removeFKBackReference(params.ctx, desc, ref)
 				}, params.ExecCfg().Settings); err != nil {
 				return err
 			}
 			descriptorChanged = true
-			if err := n.tableDesc.Validate(params.ctx, params.p.txn, params.ExecCfg().Codec); err != nil {
+			if err := n.tableDesc.Validate(
+				params.ctx, catalogkv.NewOneLevelUncachedDescGetter(params.p.Txn(), params.ExecCfg().Codec),
+			); err != nil {
 				return err
 			}
 
 		case *tree.AlterTableValidateConstraint:
-			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)
 			if err != nil {
 				return err
 			}
@@ -587,7 +611,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 						"constraint %q in the middle of being added, try again later", t.Constraint)
 				}
 				if err := validateCheckInTxn(
-					params.ctx, params.p.LeaseMgr(), &params.p.semaCtx, params.EvalContext(), n.tableDesc, params.EvalContext().Txn, name,
+					params.ctx, params.p.LeaseMgr(), &params.p.semaCtx, params.EvalContext(), n.tableDesc, params.EvalContext().Txn, ck.Expr,
 				); err != nil {
 					return err
 				}
@@ -645,7 +669,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 			if err != nil {
 				return err
 			}
-			descriptorChanged = !proto.Equal(
+			descriptorChanged = descriptorChanged || !proto.Equal(
 				&n.tableDesc.PrimaryIndex.Partitioning,
 				&partitioning,
 			)
@@ -660,11 +684,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 			n.tableDesc.PrimaryIndex.Partitioning = partitioning
 
 		case *tree.AlterTableSetAudit:
-			var err error
-			descriptorChanged, err = params.p.setAuditMode(params.ctx, n.tableDesc, t.Mode)
+			changed, err := params.p.setAuditMode(params.ctx, n.tableDesc, t.Mode)
 			if err != nil {
 				return err
 			}
+			descriptorChanged = descriptorChanged || changed
 
 		case *tree.AlterTableInjectStats:
 			sd, ok := n.statsData[i]
@@ -685,10 +709,10 @@ func (n *alterTableNode) startExec(params runParams) error {
 			if err != nil {
 				return err
 			}
-			descriptorChanged = descChanged
+			descriptorChanged = descriptorChanged || descChanged
 
 		case *tree.AlterTableRenameConstraint:
-			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)
 			if err != nil {
 				return err
 			}
@@ -718,13 +742,19 @@ func (n *alterTableNode) startExec(params runParams) error {
 			}
 
 			if err := n.tableDesc.RenameConstraint(
-				details, string(t.Constraint), string(t.NewName), depViewRenameError, func(desc *MutableTableDescriptor, ref *descpb.ForeignKeyConstraint, newName string) error {
+				details, string(t.Constraint), string(t.NewName), depViewRenameError,
+				func(desc *tabledesc.Mutable, ref *descpb.ForeignKeyConstraint, newName string) error {
 					return params.p.updateFKBackReferenceName(params.ctx, desc, ref, newName)
 				}); err != nil {
 				return err
 			}
 			descriptorChanged = true
-
+		case *tree.AlterTableOwner:
+			changed, err := params.p.alterTableOwner(params.p.EvalContext().Context, n, t.Owner)
+			if err != nil {
+				return err
+			}
+			descriptorChanged = descriptorChanged || changed
 		default:
 			return errors.AssertionFailedf("unsupported alter command: %T", cmd)
 		}
@@ -782,7 +812,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 }
 
 func (p *planner) setAuditMode(
-	ctx context.Context, desc *sqlbase.MutableTableDescriptor, auditMode tree.AuditMode,
+	ctx context.Context, desc *tabledesc.Mutable, auditMode tree.AuditMode,
 ) (bool, error) {
 	// An auditing config change is itself auditable!
 	// We record the event even if the permission check below fails:
@@ -807,9 +837,7 @@ func (n *alterTableNode) Close(context.Context)        {}
 // addIndexMutationWithSpecificPrimaryKey adds an index mutation into the given table descriptor, but sets up
 // the index with ExtraColumnIDs from the given index, rather than the table's primary key.
 func addIndexMutationWithSpecificPrimaryKey(
-	table *sqlbase.MutableTableDescriptor,
-	toAdd *descpb.IndexDescriptor,
-	primary *descpb.IndexDescriptor,
+	table *tabledesc.Mutable, toAdd *descpb.IndexDescriptor, primary *descpb.IndexDescriptor,
 ) error {
 	// Reset the ID so that a call to AllocateIDs will set up the index.
 	toAdd.ID = 0
@@ -834,7 +862,7 @@ func addIndexMutationWithSpecificPrimaryKey(
 // dependencies on sequences change, it updates them as well.
 func applyColumnMutation(
 	ctx context.Context,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	col *descpb.ColumnDescriptor,
 	mut tree.ColumnMutationCmd,
 	params runParams,
@@ -855,7 +883,7 @@ func applyColumnMutation(
 			col.DefaultExpr = nil
 		} else {
 			colDatumType := col.Type
-			expr, err := sqlbase.SanitizeVarFreeExpr(
+			expr, err := schemaexpr.SanitizeVarFreeExpr(
 				params.ctx, t.Default, colDatumType, "DEFAULT", &params.p.semaCtx, tree.VolatilityVolatile,
 			)
 			if err != nil {
@@ -900,7 +928,7 @@ func applyColumnMutation(
 			}
 		}
 
-		info, err := tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+		info, err := tableDesc.GetConstraintInfo(params.ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -908,7 +936,7 @@ func applyColumnMutation(
 		for k := range info {
 			inuseNames[k] = struct{}{}
 		}
-		check := sqlbase.MakeNotNullCheckConstraint(col.Name, col.ID, inuseNames, descpb.ConstraintValidity_Validating)
+		check := tabledesc.MakeNotNullCheckConstraint(col.Name, col.ID, inuseNames, descpb.ConstraintValidity_Validating)
 		tableDesc.AddNotNullMutation(check, descpb.DescriptorMutation_ADD)
 
 	case *tree.AlterTableDropNotNull:
@@ -935,7 +963,7 @@ func applyColumnMutation(
 					"constraint in the middle of being dropped")
 			}
 		}
-		info, err := tableDesc.GetConstraintInfo(params.ctx, nil, params.ExecCfg().Codec)
+		info, err := tableDesc.GetConstraintInfo(params.ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -947,7 +975,7 @@ func applyColumnMutation(
 
 		// Add a check constraint equivalent to the non-null constraint and drop
 		// it in the schema changer.
-		check := sqlbase.MakeNotNullCheckConstraint(col.Name, col.ID, inuseNames, descpb.ConstraintValidity_Dropping)
+		check := tabledesc.MakeNotNullCheckConstraint(col.Name, col.ID, inuseNames, descpb.ConstraintValidity_Dropping)
 		tableDesc.Checks = append(tableDesc.Checks, check)
 		tableDesc.AddNotNullMutation(check, descpb.DescriptorMutation_DROP)
 
@@ -980,7 +1008,7 @@ func labeledRowValues(cols []descpb.ColumnDescriptor, values tree.Datums) string
 // JSON). This is useful for reproducing planning issues without importing the
 // data.
 func injectTableStats(
-	params runParams, desc sqlbase.TableDescriptor, statsExpr tree.TypedExpr,
+	params runParams, desc catalog.TableDescriptor, statsExpr tree.TypedExpr,
 ) error {
 	val, err := statsExpr.Eval(params.EvalContext())
 	if err != nil {
@@ -1083,7 +1111,7 @@ func (p *planner) removeColumnComment(
 		ctx,
 		"delete-column-comment",
 		p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUser},
 		"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=$3",
 		keys.ColumnCommentType,
 		tableID,
@@ -1100,11 +1128,11 @@ func (p *planner) removeColumnComment(
 // don't have to manually take care of updating both table descriptors.
 func (p *planner) updateFKBackReferenceName(
 	ctx context.Context,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	ref *descpb.ForeignKeyConstraint,
 	newName string,
 ) error {
-	var referencedTableDesc *sqlbase.MutableTableDescriptor
+	var referencedTableDesc *tabledesc.Mutable
 	// We don't want to lookup/edit a second copy of the same table.
 	if tableDesc.ID == ref.ReferencedTableID {
 		referencedTableDesc = tableDesc
@@ -1131,4 +1159,31 @@ func (p *planner) updateFKBackReferenceName(
 		}
 	}
 	return errors.Errorf("missing backreference for foreign key %s", ref.Name)
+}
+
+// alterTableOwner sets the owner of the table to newOwner and returns true if the descriptor
+// was updated.
+func (p *planner) alterTableOwner(
+	ctx context.Context, n *alterTableNode, newOwner string,
+) (bool, error) {
+	desc := n.tableDesc
+	privs := desc.GetPrivileges()
+
+	if err := p.checkCanAlterToNewOwner(ctx, desc, privs, newOwner, n.hasOwnership); err != nil {
+		return false, err
+	}
+
+	// Ensure the new owner has CREATE privilege on the table's schema.
+	if err := p.canCreateOnSchema(ctx, desc.GetParentSchemaID(), newOwner); err != nil {
+		return false, err
+	}
+
+	// If the owner we want to set to is the current owner, do a no-op.
+	if newOwner == privs.Owner {
+		return false, nil
+	}
+
+	privs.SetOwner(newOwner)
+
+	return true, nil
 }

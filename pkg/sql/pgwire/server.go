@@ -24,12 +24,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/hba"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -42,6 +42,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 )
 
 // ATTENTION: After changing this value in a unit test, you probably want to
@@ -267,7 +268,7 @@ func MakeServer(
 
 // Match returns true if rd appears to be a Postgres connection.
 func Match(rd io.Reader) bool {
-	var buf pgwirebase.ReadBuffer
+	buf := pgwirebase.MakeReadBuffer()
 	_, err := buf.ReadUntypedMsg(rd)
 	if err != nil {
 		return false
@@ -319,7 +320,7 @@ func (s *Server) Metrics() (res []interface{}) {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (s *Server) Drain(drainWait time.Duration, reporter func(int, string)) error {
+func (s *Server) Drain(drainWait time.Duration, reporter func(int, redact.SafeString)) error {
 	return s.drainImpl(drainWait, cancelMaxWait, reporter)
 }
 
@@ -354,7 +355,7 @@ func (s *Server) setDrainingLocked(drain bool) bool {
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
 func (s *Server) drainImpl(
-	drainWait time.Duration, cancelWait time.Duration, reporter func(int, string),
+	drainWait time.Duration, cancelWait time.Duration, reporter func(int, redact.SafeString),
 ) error {
 	// This anonymous function returns a copy of s.mu.connCancelMap if there are
 	// any active connections to cancel. We will only attempt to cancel
@@ -666,7 +667,7 @@ func parseClientProvidedSessionParameters(
 	if _, ok := args.SessionDefaults["database"]; !ok {
 		// CockroachDB-specific behavior: if no database is specified,
 		// default to "defaultdb". In PostgreSQL this would be "postgres".
-		args.SessionDefaults["database"] = sqlbase.DefaultDatabaseName
+		args.SessionDefaults["database"] = catalogkeys.DefaultDatabaseName
 	}
 
 	return args, nil
@@ -690,17 +691,18 @@ func (s *Server) maybeUpgradeToSecureConn(
 	if version != versionSSL {
 		// The client did not require a SSL connection.
 
-		if !s.cfg.Insecure && connType != hba.ConnLocal {
-			// Currently non-SSL connections are not allowed in secure
-			// mode. Ideally, we want to allow this and subject it to HBA
-			// rules ('hostssl' vs 'hostnossl').
-			//
-			// TODO(knz): revisit this when needed.
-			clientErr = pgerror.New(pgcode.ProtocolViolation, ErrSSLRequired)
+		// Insecure mode: nothing to say, nothing to do.
+		// TODO(knz): Remove this condition - see
+		// https://github.com/cockroachdb/cockroach/issues/53404
+		if s.cfg.Insecure {
 			return
 		}
 
-		// Non-SSL in non-secure mode, all is well: no-op.
+		// Secure mode: disallow if TCP and the user did not opt into
+		// non-TLS SQL conns.
+		if !s.cfg.AcceptSQLWithoutTLS && connType != hba.ConnLocal {
+			clientErr = pgerror.New(pgcode.ProtocolViolation, ErrSSLRequired)
+		}
 		return
 	}
 
@@ -795,6 +797,9 @@ func (s *Server) readVersion(
 	conn io.Reader,
 ) (version uint32, buf pgwirebase.ReadBuffer, err error) {
 	var n int
+	buf = pgwirebase.MakeReadBuffer(
+		pgwirebase.ReadBufferOptionWithClusterSettings(&s.execCfg.Settings.SV),
+	)
 	n, err = buf.ReadUntypedMsg(conn)
 	if err != nil {
 		return

@@ -114,6 +114,12 @@ var (
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaDistSenderErrCountTmpl = metric.Metadata{
+		Name:        "distsender.rpc.err.%s",
+		Help:        "Number of %s errors received",
+		Measurement: "Errors",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 // CanSendToFollower is used by the DistSender to determine if it needs to look
@@ -131,6 +137,9 @@ const (
 	defaultSenderConcurrency = 500
 	// The maximum number of range descriptors to prefetch during range lookups.
 	rangeLookupPrefetchCount = 8
+	// The maximum number of times a replica is retried when it repeatedly returns
+	// stale lease info.
+	sameReplicaRetryLimit = 10
 )
 
 var rangeDescriptorCacheSize = settings.RegisterIntSetting(
@@ -166,6 +175,7 @@ type DistSenderMetrics struct {
 	RangeLookups            *metric.Counter
 	SlowRPCs                *metric.Gauge
 	MethodCounts            [roachpb.NumMethods]*metric.Counter
+	ErrCounts               [roachpb.NumErrors]*metric.Counter
 }
 
 func makeDistSenderMetrics() DistSenderMetrics {
@@ -188,6 +198,13 @@ func makeDistSenderMetrics() DistSenderMetrics {
 		meta.Name = fmt.Sprintf(meta.Name, strings.ToLower(method))
 		meta.Help = fmt.Sprintf(meta.Help, method)
 		m.MethodCounts[i] = metric.NewCounter(meta)
+	}
+	for i := range m.ErrCounts {
+		errType := roachpb.ErrorDetailType(i).String()
+		meta := metaDistSenderErrCountTmpl
+		meta.Name = fmt.Sprintf(meta.Name, strings.ToLower(errType))
+		meta.Help = fmt.Sprintf(meta.Help, errType)
+		m.ErrCounts[i] = metric.NewCounter(meta)
 	}
 	return m
 }
@@ -625,11 +642,11 @@ func splitBatchAndCheckForRefreshSpans(
 			ba.CanForwardReadTimestamp = false
 
 			// If the final part contains an EndTxn request, unset its
-			// CanCommitAtHigherTimestamp flag as well.
+			// DeprecatedCanCommitAtHigherTimestamp flag as well.
 			lastPart := parts[len(parts)-1]
 			if et := lastPart[len(lastPart)-1].GetEndTxn(); et != nil {
 				etCopy := *et
-				etCopy.CanCommitAtHigherTimestamp = false
+				etCopy.DeprecatedCanCommitAtHigherTimestamp = false
 				lastPart = append([]roachpb.RequestUnion(nil), lastPart...)
 				lastPart[len(lastPart)-1].MustSetInner(&etCopy)
 				parts[len(parts)-1] = lastPart
@@ -657,13 +674,14 @@ func unsetCanForwardReadTimestampFlag(ctx context.Context, ba *roachpb.BatchRequ
 			// Unset the flag.
 			ba.CanForwardReadTimestamp = false
 
-			// We would need to also unset the CanCommitAtHigherTimestamp flag
-			// on any EndTxn request in the batch, but it turns out that because
-			// we call this function when a batch is split across ranges, we'd
-			// already have bailed if the EndTxn wasn't a parallel commit — and
-			// if it was a parallel commit then we must not have any requests
-			// that need to refresh (see txnCommitter.canCommitInParallel).
-			// Assert this for our own sanity.
+			// We would need to also unset the DeprecatedCanCommitAtHigherTimestamp
+			// flag on any EndTxn request in the batch, but it turns out that
+			// because we call this function when a batch is split across
+			// ranges, we'd already have bailed if the EndTxn wasn't a parallel
+			// commit — and if it was a parallel commit then we must not have
+			// any requests that need to refresh (see
+			// txnCommitter.canCommitInParallel). Assert this for our own
+			// sanity.
 			if _, ok := ba.GetArg(roachpb.EndTxn); ok {
 				log.Fatalf(ctx, "batch unexpected contained requests "+
 					"that need to refresh and an EndTxn request: %s", ba.String())
@@ -942,7 +960,7 @@ func (ds *DistSender) divideAndSendParallelCommit(
 			// to intent resolution and can be safely ignored.
 			ignoreMissing, err = ds.detectIntentMissingDueToIntentResolution(ctx, br.Txn)
 			if err != nil {
-				return nil, roachpb.NewError(err)
+				return nil, roachpb.NewErrorWithTxn(err, br.Txn)
 			}
 		}
 		if !ignoreMissing {
@@ -1007,9 +1025,10 @@ func (ds *DistSender) detectIntentMissingDueToIntentResolution(
 		// We weren't able to determine whether the intent missing error is
 		// due to intent resolution or not, so it is still ambiguous whether
 		// the commit succeeded.
-		return false, roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [intent missing]", pErr))
+		return false, roachpb.NewAmbiguousResultErrorf("error=%s [intent missing]", pErr)
 	}
-	respTxn := &br.Responses[0].GetQueryTxn().QueriedTxn
+	resp := br.Responses[0].GetQueryTxn()
+	respTxn := &resp.QueriedTxn
 	switch respTxn.Status {
 	case roachpb.COMMITTED:
 		// The transaction has already been finalized as committed. The missing
@@ -1020,19 +1039,19 @@ func (ds *DistSender) detectIntentMissingDueToIntentResolution(
 		// successfully, so ignore the error.
 		return true, nil
 	case roachpb.ABORTED:
-		// The transaction has either already been finalized as aborted or has
-		// been finalized as committed and already had its transaction record
-		// GCed. We can't distinguish between these two conditions with full
-		// certainty, so we're forced to return an ambiguous commit error.
-		// TODO(nvanbenschoten): QueryTxn will materialize an ABORTED transaction
-		// record if one does not already exist. If we are certain that no actor
-		// will ever persist an ABORTED transaction record after a COMMIT record is
-		// GCed and we returned whether the record was synthesized in the QueryTxn
-		// response then we could use the existence of an ABORTED transaction record
-		// to further isolates the ambiguity caused by the loss of information
-		// during intent resolution. If this error becomes a problem, we can explore
-		// this option.
-		return false, roachpb.NewAmbiguousResultError("intent missing and record aborted")
+		// The transaction has either already been finalized as aborted or has been
+		// finalized as committed and already had its transaction record GCed. Both
+		// these cases return an ABORTED txn; in the GC case the record has been
+		// synthesized.
+		// If the the record has been GC'ed, then we can't distinguish between the
+		// two cases, and so we're forced to return an ambiguous error. On the other
+		// hand, if the record exists, then we know that the transaction did not
+		// commit because a committed record cannot be GC'ed and the recreated as
+		// ABORTED.
+		if resp.TxnRecordExists {
+			return false, roachpb.NewTransactionAbortedError(roachpb.ABORT_REASON_ABORTED_RECORD_FOUND)
+		}
+		return false, roachpb.NewAmbiguousResultErrorf("intent missing and record aborted")
 	default:
 		// The transaction has not been finalized yet, so the missing intent
 		// error must have been caused by a real missing intent. Propagate the
@@ -1351,9 +1370,21 @@ func (ds *DistSender) sendPartialBatchAsync(
 }
 
 func slowRangeRPCWarningStr(
-	dur time.Duration, attempts int64, desc *roachpb.RangeDescriptor, pErr *roachpb.Error,
+	ba roachpb.BatchRequest,
+	dur time.Duration,
+	attempts int64,
+	desc *roachpb.RangeDescriptor,
+	err error,
+	br *roachpb.BatchResponse,
 ) string {
-	return fmt.Sprintf("have been waiting %.2fs (%d attempts) for RPC to %s: %s", dur.Seconds(), attempts, desc, pErr)
+	var resp string
+	if err != nil {
+		resp = err.Error()
+	} else {
+		resp = br.String()
+	}
+	return fmt.Sprintf("have been waiting %.2fs (%d attempts) for RPC %s to %s; resp: %s",
+		dur.Seconds(), attempts, ba, desc, resp)
 }
 
 func slowRangeRPCReturnWarningStr(dur time.Duration, attempts int64) string {
@@ -1433,6 +1464,9 @@ func (ds *DistSender) sendPartialBatch(
 				// We set pErr if we encountered an error getting the descriptor in
 				// order to return the most recent error when we are out of retries.
 				pErr = roachpb.NewError(err)
+				if !isRangeLookupErrorRetryable(err) {
+					return response{pErr: roachpb.NewError(err)}
+				}
 				continue
 			}
 
@@ -1453,6 +1487,24 @@ func (ds *DistSender) sendPartialBatch(
 		}
 
 		reply, err = ds.sendToReplicas(ctx, ba, routing, withCommit)
+
+		const slowDistSenderThreshold = time.Minute
+		if dur := timeutil.Since(tBegin); dur > slowDistSenderThreshold && !tBegin.IsZero() {
+			log.Warningf(ctx, "slow range RPC: %v",
+				slowRangeRPCWarningStr(ba, dur, attempts, routing.Desc(), err, reply))
+			// If the RPC wasn't successful, defer the logging of a message once the
+			// RPC is not retried any more.
+			if err != nil || reply.Error != nil {
+				ds.metrics.SlowRPCs.Inc(1)
+				defer func(tBegin time.Time, attempts int64) {
+					ds.metrics.SlowRPCs.Dec(1)
+					log.Warningf(ctx, "slow RPC response: %v",
+						slowRangeRPCReturnWarningStr(timeutil.Since(tBegin), attempts))
+				}(tBegin, attempts)
+			}
+			tBegin = time.Time{} // prevent reentering branch for this RPC
+		}
+
 		if err != nil {
 			// Set pErr so that, if we don't perform any more retries, the
 			// deduceRetryEarlyExitError() call below the loop is inhibited.
@@ -1500,19 +1552,6 @@ func (ds *DistSender) sendPartialBatch(
 			pErr.Index.Index = int32(positions[pErr.Index.Index])
 		}
 
-		const slowDistSenderThreshold = time.Minute
-		if dur := timeutil.Since(tBegin); dur > slowDistSenderThreshold && !tBegin.IsZero() {
-			ds.metrics.SlowRPCs.Inc(1)
-			dur := dur // leak dur to heap only when branch taken
-			log.Warningf(ctx, "slow range RPC: %v",
-				slowRangeRPCWarningStr(dur, attempts, routing.Desc(), pErr))
-			defer func(tBegin time.Time, attempts int64) {
-				ds.metrics.SlowRPCs.Dec(1)
-				log.Warningf(ctx, "slow RPC response: %v",
-					slowRangeRPCReturnWarningStr(timeutil.Since(tBegin), attempts))
-			}(tBegin, attempts)
-			tBegin = time.Time{} // prevent reentering branch for this RPC
-		}
 		log.VErrEventf(ctx, 2, "reply error %s: %s", ba, pErr)
 
 		// Error handling: If the error indicates that our range
@@ -1574,7 +1613,7 @@ func (ds *DistSender) deduceRetryEarlyExitError(ctx context.Context) error {
 		return &roachpb.NodeUnavailableError{}
 	case <-ctx.Done():
 		// Happens when the client request is canceled.
-		return errors.Wrap(ctx.Err(), "aborted in distSender")
+		return errors.Wrap(ctx.Err(), "aborted in DistSender")
 	default:
 	}
 	return nil
@@ -1676,7 +1715,7 @@ func fillSkippedResponses(
 // the error that the last attempt to execute the request returned.
 func noMoreReplicasErr(ambiguousErr, lastAttemptErr error) error {
 	if ambiguousErr != nil {
-		return roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [exhausted]", ambiguousErr))
+		return roachpb.NewAmbiguousResultErrorf("error=%s [exhausted]", ambiguousErr)
 	}
 
 	// TODO(bdarnell): The error from the last attempt is not necessarily the best
@@ -1744,7 +1783,7 @@ func (ds *DistSender) sendToReplicas(
 		class:   rpc.ConnectionClassForKey(desc.RSpan().Key),
 		metrics: &ds.metrics,
 	}
-	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas)
+	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas.Descriptors())
 	if err != nil {
 		return nil, err
 	}
@@ -1753,6 +1792,8 @@ func (ds *DistSender) sendToReplicas(
 	// lease transfer is suspected.
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
+	var sameReplicaRetries int
+	var prevReplica roachpb.ReplicaDescriptor
 
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
@@ -1788,7 +1829,13 @@ func (ds *DistSender) sendToReplicas(
 			}
 		} else {
 			log.VEventf(ctx, 2, "trying next peer %s", curReplica.String())
+			if prevReplica == curReplica {
+				sameReplicaRetries++
+			} else {
+				sameReplicaRetries = 0
+			}
 		}
+		prevReplica = curReplica
 		// Communicate to the server the information our cache has about the range.
 		// If it's stale, the serve will return an update.
 		ba.ClientRangeInfo = &roachpb.ClientRangeInfo{
@@ -1803,8 +1850,17 @@ func (ds *DistSender) sendToReplicas(
 			LeaseSequence: routing.LeaseSeq(),
 		}
 		br, err = transport.SendNext(ctx, ba)
+		ds.maybeIncrementErrCounters(br, err)
 
 		if err != nil {
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
+				if ambiguousError != nil {
+					return nil, roachpb.NewAmbiguousResultErrorf("error=%s [propagate]", ambiguousError)
+				}
+				return nil, err
+			}
+
 			// For most connection errors, we cannot tell whether or not the request
 			// may have succeeded on the remote server (exceptions are captured in the
 			// grpcutil.RequestDidNotStart function). We'll retry the request in order
@@ -1922,9 +1978,20 @@ func (ds *DistSender) sendToReplicas(
 						routing = routing.UpdateLeaseholder(ctx, *tErr.LeaseHolder)
 						ok = true
 					}
-					// Move the new lease holder to the head of the queue for the next retry.
+					// Move the new leaseholder to the head of the queue for the next
+					// retry. Note that the leaseholder might not be the one indicated by
+					// the NLHE we just received, in case that error carried stale info.
 					if lh := routing.Leaseholder(); lh != nil {
-						transport.MoveToFront(*lh)
+						// If the leaseholder is the replica that we've just tried, and
+						// we've tried this replica a bunch of times already, let's move on
+						// and not try it again. This prevents us getting stuck on a replica
+						// that we think has the lease but keeps returning redirects to us
+						// (possibly because it hasn't applied its lease yet). Perhaps that
+						// lease expires and someone else gets a new one, so by moving on we
+						// get out of possibly infinite loops.
+						if *lh != curReplica || sameReplicaRetries < sameReplicaRetryLimit {
+							transport.MoveToFront(*lh)
+						}
 					}
 					// See if we want to backoff a little before the next attempt. If the lease info
 					// we got is stale, we backoff because it might be the case that there's a
@@ -1940,7 +2007,7 @@ func (ds *DistSender) sendToReplicas(
 				}
 			default:
 				if ambiguousError != nil {
-					return nil, roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [propagate]", ambiguousError))
+					return nil, roachpb.NewAmbiguousResultErrorf("error=%s [propagate]", ambiguousError)
 				}
 
 				// The error received is likely not specific to this
@@ -1957,7 +2024,7 @@ func (ds *DistSender) sendToReplicas(
 			reportedErr := errors.Wrap(ctx.Err(), "context done during DistSender.Send")
 			log.Eventf(ctx, "%v", reportedErr)
 			if ambiguousError != nil {
-				return nil, roachpb.NewAmbiguousResultError(reportedErr.Error())
+				return nil, roachpb.NewAmbiguousResultErrorf(reportedErr.Error())
 			}
 			// Don't consider this a sendError, because sendErrors indicate that we
 			// were unable to reach a replica that could serve the request, and they
@@ -1965,6 +2032,17 @@ func (ds *DistSender) sendToReplicas(
 			// sender changed its mind or the request timed out.
 			return nil, errors.Wrap(ctx.Err(), "aborted during DistSender.Send")
 		}
+	}
+}
+
+func (ds *DistSender) maybeIncrementErrCounters(br *roachpb.BatchResponse, err error) {
+	if err == nil && br.Error == nil {
+		return
+	}
+	if err != nil {
+		ds.metrics.ErrCounts[roachpb.CommunicationErrType].Inc(1)
+	} else {
+		ds.metrics.ErrCounts[br.Error.GetDetail().Type()].Inc(1)
 	}
 }
 

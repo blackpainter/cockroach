@@ -434,6 +434,15 @@ var (
 		},
 	}
 
+	// Box2D is the type of a geospatial box2d object.
+	Box2D = &T{
+		InternalType: InternalType{
+			Family: Box2DFamily,
+			Oid:    oidext.T_box2d,
+			Locale: &emptyLocale,
+		},
+	}
+
 	// Scalar contains all types that meet this criteria:
 	//
 	//   1. Scalar type (no ArrayFamily or TupleFamily types).
@@ -442,6 +451,7 @@ var (
 	//
 	Scalar = []*T{
 		Bool,
+		Box2D,
 		Int,
 		Float,
 		Decimal,
@@ -1209,8 +1219,14 @@ func RemapUserDefinedTypeOIDs(t *T, newOID, newArrayOID oid.Oid) {
 
 // UserDefined returns whether or not t is a user defined type.
 func (t *T) UserDefined() bool {
+	return IsOIDUserDefinedType(t.Oid())
+}
+
+// IsOIDUserDefinedType returns whether or not o corresponds to a user
+// defined type.
+func IsOIDUserDefinedType(o oid.Oid) bool {
 	// Types with OIDs larger than the predefined max are user defined.
-	return t.Oid() > oidext.CockroachPredefinedOIDMax
+	return o > oidext.CockroachPredefinedOIDMax
 }
 
 var familyNames = map[Family]string{
@@ -1218,6 +1234,7 @@ var familyNames = map[Family]string{
 	ArrayFamily:          "array",
 	BitFamily:            "bit",
 	BoolFamily:           "bool",
+	Box2DFamily:          "box2d",
 	BytesFamily:          "bytes",
 	CollatedStringFamily: "collatedstring",
 	DateFamily:           "date",
@@ -1425,6 +1442,8 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 		return buf.String()
 	case BoolFamily:
 		return "boolean"
+	case Box2DFamily:
+		return "box2d"
 	case BytesFamily:
 		return "bytea"
 	case DateFamily:
@@ -2297,6 +2316,16 @@ func (t *T) IsAmbiguous() bool {
 	return false
 }
 
+// IsNumeric returns true iff this type is an integer, float, or decimal.
+func (t *T) IsNumeric() bool {
+	switch t.Family() {
+	case IntFamily, FloatFamily, DecimalFamily:
+		return true
+	default:
+		return false
+	}
+}
+
 // EnumGetIdxOfPhysical returns the index within the TypeMeta's slice of
 // enum physical representations that matches the input byte slice.
 func (t *T) EnumGetIdxOfPhysical(phys []byte) (int, error) {
@@ -2457,6 +2486,12 @@ func (t *T) stringTypeSQL() string {
 	}
 
 	return typName
+}
+
+// IsHydrated returns true if this is a user-defined type and the TypeMeta
+// is hydrated.
+func (t *T) IsHydrated() bool {
+	return t.UserDefined() && t.TypeMeta != (UserDefinedTypeMetadata{})
 }
 
 var typNameLiterals map[string]*T

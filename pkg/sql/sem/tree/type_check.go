@@ -700,7 +700,7 @@ func (expr *ComparisonExpr) TypeCheck(
 	var cmpOp *CmpOp
 	var alwaysNull bool
 	var err error
-	if expr.Operator.hasSubOperator() {
+	if expr.Operator.HasSubOperator() {
 		leftTyped, rightTyped, cmpOp, alwaysNull, err = typeCheckComparisonOpWithSubOperator(
 			ctx,
 			semaCtx,
@@ -736,7 +736,7 @@ func (expr *ComparisonExpr) TypeCheck(
 	}
 
 	expr.Left, expr.Right = leftTyped, rightTyped
-	expr.fn = cmpOp
+	expr.Fn = cmpOp
 	expr.typ = types.Bool
 	return expr, nil
 }
@@ -785,7 +785,7 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	if def.UnsupportedWithIssue != 0 {
 		// Note: no need to embed the function name in the message; the
 		// caller will add the function name as prefix.
-		const msg = "this function is not supported"
+		const msg = "this function is not yet supported"
 		if def.UnsupportedWithIssue < 0 {
 			return unimplemented.New(def.Name+"()", msg)
 		}
@@ -1621,6 +1621,12 @@ func (d *DInterval) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (Ty
 
 // TypeCheck implements the Expr interface. It is implemented as an idempotent
 // identity function for Datum.
+func (d *DBox2D) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (TypedExpr, error) {
+	return d, nil
+}
+
+// TypeCheck implements the Expr interface. It is implemented as an idempotent
+// identity function for Datum.
 func (d *DGeography) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (TypedExpr, error) {
 	return d, nil
 }
@@ -1726,6 +1732,7 @@ const (
 	compSignatureWithSubOpFmt = "<%s> %s %s <%s>"
 	compExprsFmt              = "%s %s %s: %v"
 	compExprsWithSubOpFmt     = "%s %s %s %s: %v"
+	invalidCompErrFmt         = "invalid comparison between different %s types: %s"
 	unsupportedCompErrFmt     = "unsupported comparison operator: %s"
 	unsupportedUnaryOpErrFmt  = "unsupported unary operator: %s"
 	unsupportedBinaryOpErrFmt = "unsupported binary operator: %s"
@@ -1745,7 +1752,7 @@ func typeCheckComparisonOpWithSubOperator(
 
 	// Determine the set of comparisons are possible for the sub-operation,
 	// which will be memoized.
-	foldedOp, _, _, _, _ := foldComparisonExpr(subOp, nil, nil)
+	foldedOp, _, _, _, _ := FoldComparisonExpr(subOp, nil, nil)
 	ops := CmpOps[foldedOp]
 
 	var cmpTypeLeft, cmpTypeRight *types.T
@@ -1870,7 +1877,7 @@ func typeCheckSubqueryWithIn(left, right *types.T) error {
 func typeCheckComparisonOp(
 	ctx context.Context, semaCtx *SemaContext, op ComparisonOperator, left, right Expr,
 ) (_ TypedExpr, _ TypedExpr, _ *CmpOp, alwaysNull bool, _ error) {
-	foldedOp, foldedLeft, foldedRight, switched, _ := foldComparisonExpr(op, left, right)
+	foldedOp, foldedLeft, foldedRight, switched, _ := FoldComparisonExpr(op, left, right)
 	ops := CmpOps[foldedOp]
 
 	_, leftIsTuple := foldedLeft.(*Tuple)
@@ -2013,6 +2020,13 @@ func typeCheckComparisonOp(
 	if len(fns) != 1 || typeMismatch {
 		sig := fmt.Sprintf(compSignatureFmt, leftReturn, op, rightReturn)
 		if len(fns) == 0 || typeMismatch {
+			// For some typeMismatch errors, we want to emit a more specific error
+			// message than "unknown comparison". In particular, comparison between
+			// two different enum types is invalid, rather than just unsupported.
+			if typeMismatch && leftFamily == types.EnumFamily && rightFamily == types.EnumFamily {
+				return nil, nil, nil, false,
+					pgerror.Newf(pgcode.InvalidParameterValue, invalidCompErrFmt, "enum", sig)
+			}
 			return nil, nil, nil, false,
 				pgerror.Newf(pgcode.InvalidParameterValue, unsupportedCompErrFmt, sig)
 		}
@@ -2589,7 +2603,7 @@ func (v stripFuncsVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
 	case *BinaryExpr:
 		t.Fn = nil
 	case *ComparisonExpr:
-		t.fn = nil
+		t.Fn = nil
 	case *FuncExpr:
 		t.fn = nil
 		t.fnProps = nil

@@ -169,7 +169,7 @@ func neededMutationFetchCols(
 
 			// Always add index strict key columns, since these are needed to fetch
 			// existing rows from the store.
-			keyCols := tabMeta.IndexKeyColumns(i)
+			keyCols := tabMeta.IndexKeyColumnsMapVirtual(i)
 			cols.UnionWith(keyCols)
 
 			// Add all columns in any family that includes an update column.
@@ -186,7 +186,7 @@ func neededMutationFetchCols(
 				indexCols.ForEach(func(col opt.ColumnID) {
 					ord := tabMeta.MetaID.ColumnOrdinal(col)
 					// We don't want to include system columns.
-					if !cat.IsSystemColumn(tabMeta.Table, ord) {
+					if tabMeta.Table.Column(ord).Kind() != cat.System {
 						cols.Add(col)
 					}
 				})
@@ -199,7 +199,7 @@ func neededMutationFetchCols(
 		// it is necessary to delete rows even from indexes that are being added
 		// or dropped.
 		for i, n := 0, tabMeta.Table.DeletableIndexCount(); i < n; i++ {
-			cols.UnionWith(tabMeta.IndexKeyColumns(i))
+			cols.UnionWith(tabMeta.IndexKeyColumnsMapVirtual(i))
 		}
 	}
 

@@ -78,6 +78,7 @@ const (
 	CrdbInternalTableIndexesTableID
 	CrdbInternalTablesTableID
 	CrdbInternalTablesTableLastStatsID
+	CrdbInternalTransactionStatsTableID
 	CrdbInternalTxnStatsTableID
 	CrdbInternalZonesTableID
 	InformationSchemaID
@@ -86,6 +87,7 @@ const (
 	InformationSchemaCheckConstraints
 	InformationSchemaColumnPrivilegesID
 	InformationSchemaColumnsTableID
+	InformationSchemaColumnUDTUsageID
 	InformationSchemaConstraintColumnUsageTableID
 	InformationSchemaEnabledRolesID
 	InformationSchemaKeyColumnUsageTableID

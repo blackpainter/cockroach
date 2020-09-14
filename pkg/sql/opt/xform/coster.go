@@ -133,6 +133,10 @@ const (
 	// If the final expression has this cost or larger, it means that there was no
 	// plan that could satisfy the hints.
 	hugeCost memo.Cost = 1e100
+
+	// preferLookupJoinFactor is a scale factor for the cost of a lookup join when
+	// we have a hint for preferring a lookup join.
+	preferLookupJoinFactor = 1e-6
 )
 
 // fnCost maps some functions to an execution cost. Currently this list
@@ -567,14 +571,21 @@ func (c *coster) computeScanCost(scan *memo.ScanExpr, required *physical.Require
 		}
 	}
 
+	numSpans := 1
+	if scan.Constraint != nil {
+		numSpans = scan.Constraint.Spans.Count()
+	} else if scan.InvertedConstraint != nil {
+		numSpans = len(scan.InvertedConstraint)
+	}
+	baseCost := memo.Cost(numSpans * randIOCostFactor)
+
 	// Add a small cost if the scan is unconstrained, so all else being equal, we
 	// will prefer a constrained scan. This is important if our row count
 	// estimate turns out to be smaller than the actual row count.
-	var preferConstrainedScanCost memo.Cost
 	if scan.IsUnfiltered(c.mem.Metadata()) {
-		preferConstrainedScanCost = cpuCostFactor
+		baseCost += cpuCostFactor
 	}
-	return memo.Cost(rowCount)*(seqIOCostFactor+perRowCost) + preferConstrainedScanCost
+	return baseCost + memo.Cost(rowCount)*(seqIOCostFactor+perRowCost)
 }
 
 func (c *coster) computeSelectCost(sel *memo.SelectExpr) memo.Cost {
@@ -609,7 +620,7 @@ func (c *coster) computeValuesCost(values *memo.ValuesExpr) memo.Cost {
 }
 
 func (c *coster) computeHashJoinCost(join memo.RelExpr) memo.Cost {
-	if !join.Private().(*memo.JoinPrivate).Flags.Has(memo.AllowHashJoinStoreRight) {
+	if join.Private().(*memo.JoinPrivate).Flags.Has(memo.DisallowHashJoinStoreRight) {
 		return hugeCost
 	}
 	leftRowCount := join.Child(0).(memo.RelExpr).Relational().Stats.RowCount
@@ -752,6 +763,11 @@ func (c *coster) computeLookupJoinCost(
 		c.rowScanCost(join.Table, join.Index, numLookupCols)
 
 	cost += memo.Cost(rowsProcessed) * perRowCost
+
+	if join.Flags.Has(memo.PreferLookupJoinIntoRight) {
+		// If we prefer a lookup join, make the cost much smaller.
+		cost *= preferLookupJoinFactor
+	}
 	return cost
 }
 
@@ -1014,7 +1030,7 @@ func (c *coster) rowScanCost(tabID opt.TableID, idxOrd int, numScannedCols int) 
 	numCols := idx.ColumnCount()
 	// Remove any system columns from numCols.
 	for i := 0; i < idx.ColumnCount(); i++ {
-		if cat.IsSystemColumn(tab, idx.Column(i).Ordinal) {
+		if idx.Column(i).Kind() == cat.System {
 			numCols--
 		}
 	}

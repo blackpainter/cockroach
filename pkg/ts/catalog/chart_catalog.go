@@ -81,18 +81,6 @@ var charts = []sectionDescription{
 				Metrics:     []string{"security.certificate.expiration.ui-ca"},
 			},
 			{
-				Title:       "Tenant Server CA Cert Expiration",
-				Downsampler: DescribeAggregator_MAX,
-				Aggregator:  DescribeAggregator_MAX,
-				Metrics:     []string{"security.certificate.expiration.ca-server-tenant"},
-			},
-			{
-				Title:       "Tenant Server Cert Expiration",
-				Downsampler: DescribeAggregator_MAX,
-				Aggregator:  DescribeAggregator_MAX,
-				Metrics:     []string{"security.certificate.expiration.server-tenant"},
-			},
-			{
 				Title:       "Tenant Client CA Cert Expiration",
 				Downsampler: DescribeAggregator_MAX,
 				Aggregator:  DescribeAggregator_MAX,
@@ -336,6 +324,51 @@ var charts = []sectionDescription{
 					"distsender.rpc.transferlease.sent",
 					"distsender.rpc.truncatelog.sent",
 					"distsender.rpc.writebatch.sent",
+				},
+			},
+			{
+				Title: "Errors",
+				Metrics: []string{
+					"distsender.rpc.err.ambiguousresulterrtype",
+					"distsender.rpc.err.batchtimestampbeforegcerrtype",
+					"distsender.rpc.err.communicationerrtype",
+					"distsender.rpc.err.conditionfailederrtype",
+					"distsender.rpc.err.errordetailtype(0)",
+					"distsender.rpc.err.errordetailtype(15)",
+					"distsender.rpc.err.errordetailtype(19)",
+					"distsender.rpc.err.errordetailtype(20)",
+					"distsender.rpc.err.errordetailtype(21)",
+					"distsender.rpc.err.errordetailtype(23)",
+					"distsender.rpc.err.errordetailtype(24)",
+					"distsender.rpc.err.errordetailtype(29)",
+					"distsender.rpc.err.errordetailtype(30)",
+					"distsender.rpc.err.errordetailtype(33)",
+					"distsender.rpc.err.indeterminatecommiterrtype",
+					"distsender.rpc.err.integeroverflowerrtype",
+					"distsender.rpc.err.intentmissingerrtype",
+					"distsender.rpc.err.internalerrtype",
+					"distsender.rpc.err.leaserejectederrtype",
+					"distsender.rpc.err.mergeinprogresserrtype",
+					"distsender.rpc.err.nodeunavailableerrtype",
+					"distsender.rpc.err.notleaseholdererrtype",
+					"distsender.rpc.err.oprequirestxnerrtype",
+					"distsender.rpc.err.raftgroupdeletederrtype",
+					"distsender.rpc.err.rangefeedretryerrtype",
+					"distsender.rpc.err.rangekeymismatcherrtype",
+					"distsender.rpc.err.rangenotfounderrtype",
+					"distsender.rpc.err.readwithinuncertaintyintervalerrtype",
+					"distsender.rpc.err.replicacorruptionerrtype",
+					"distsender.rpc.err.replicatooolderrtype",
+					"distsender.rpc.err.storenotfounderrtype",
+					"distsender.rpc.err.transactionabortederrtype",
+					"distsender.rpc.err.transactionpusherrtype",
+					"distsender.rpc.err.transactionretryerrtype",
+					"distsender.rpc.err.transactionretrywithprotorefresherrtype",
+					"distsender.rpc.err.transactionstatuserrtype",
+					"distsender.rpc.err.txnalreadyencounterederrtype",
+					"distsender.rpc.err.unsupportedrequesterrtype",
+					"distsender.rpc.err.writeintenterrtype",
+					"distsender.rpc.err.writetooolderrtype",
 				},
 			},
 		},
@@ -710,16 +743,28 @@ var charts = []sectionDescription{
 				Metrics:     []string{"kv.tenant_rate_limit.num_tenants"},
 			},
 			{
-				Title:       "Requests Admitted by Rate Limiter",
+				Title:       "Read Requests Admitted by Rate Limiter",
 				Downsampler: DescribeAggregator_MAX,
 				Percentiles: false,
-				Metrics:     []string{"kv.tenant_rate_limit.num_tenants"},
+				Metrics:     []string{"kv.tenant_rate_limit.read_requests_admitted"},
+			},
+			{
+				Title:       "Write Requests Admitted by Rate Limiter",
+				Downsampler: DescribeAggregator_MAX,
+				Percentiles: false,
+				Metrics:     []string{"kv.tenant_rate_limit.write_requests_admitted"},
+			},
+			{
+				Title:       "Read Bytes Admitted by Rate Limiter",
+				Downsampler: DescribeAggregator_MAX,
+				Percentiles: false,
+				Metrics:     []string{"kv.tenant_rate_limit.read_bytes_admitted"},
 			},
 			{
 				Title:       "Write Bytes Admitted by Rate Limiter",
 				Downsampler: DescribeAggregator_MAX,
 				Percentiles: false,
-				Metrics:     []string{"kv.tenant_rate_limit.requests_admitted"},
+				Metrics:     []string{"kv.tenant_rate_limit.write_bytes_admitted"},
 			},
 		},
 	},
@@ -884,6 +929,10 @@ var charts = []sectionDescription{
 			{
 				Title:   "Transactions exceeding refresh spans memory limit",
 				Metrics: []string{"txn.refresh.memory_limit_exceeded"},
+			},
+			{
+				Title:   "Auto-Retries",
+				Metrics: []string{"txn.refresh.auto_retries"},
 			},
 			{
 				Title: "Commits",
@@ -1441,6 +1490,44 @@ var charts = []sectionDescription{
 			{
 				Title:   "Total",
 				Metrics: []string{"sql.distsql.flows.total"},
+			},
+		},
+	},
+	{
+		Organization: [][]string{{SQLLayer, "SQL Catalog", "Hydrated Descriptor Cache"}},
+		Charts: []chartDescription{
+			{
+				Title: "Cache Hits and Misses",
+				Metrics: []string{
+					"sql.hydrated_table_cache.hits",
+					"sql.hydrated_table_cache.misses",
+				},
+			},
+		},
+	},
+	{
+		Organization: [][]string{{SQLLayer, "SQL Liveness"}},
+		Charts: []chartDescription{
+			{
+				Title: "Session Writes",
+				Metrics: []string{
+					"sqlliveness.write_successes",
+					"sqlliveness.write_failures",
+				},
+			},
+			{
+				Title: "IsAlive cache",
+				Metrics: []string{
+					"sqlliveness.is_alive.cache_hits",
+					"sqlliveness.is_alive.cache_misses",
+				},
+			},
+			{
+				Title: "Session deletion",
+				Metrics: []string{
+					"sqlliveness.sessions_deletion_runs",
+					"sqlliveness.sessions_deleted",
+				},
 			},
 		},
 	},
@@ -2103,6 +2190,46 @@ var charts = []sectionDescription{
 			{
 				Title:   "Size",
 				Metrics: []string{"timeseries.write.bytes"},
+			},
+		},
+	},
+	{
+		Organization: [][]string{{Jobs, "Schedules", "Daemon"}},
+		Charts: []chartDescription{
+			{
+				Title: "Round",
+				Metrics: []string{
+
+					"schedules.round.schedules-ready-to-run",
+					"schedules.round.reschedule-skip",
+					"schedules.round.reschedule-wait",
+					"schedules.round.jobs-started",
+					"schedules.round.num-jobs-running",
+				},
+				AxisLabel: "Count",
+			},
+			{
+				Title: "Total",
+				Metrics: []string{
+					"schedules.corrupt",
+					"schedules.total.started",
+					"schedules.total.succeeded",
+					"schedules.total.failed",
+				},
+				AxisLabel: "Count",
+			},
+		},
+	},
+	{
+		Organization: [][]string{{Jobs, "Schedules", "Backup"}},
+		Charts: []chartDescription{
+			{
+				Title: "Counts",
+				Metrics: []string{
+					"schedules.BACKUP.started",
+					"schedules.BACKUP.succeeded",
+					"schedules.BACKUP.failed",
+				},
 			},
 		},
 	},

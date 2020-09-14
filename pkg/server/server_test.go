@@ -38,8 +38,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -562,9 +563,9 @@ func TestSystemConfigGossip(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 	ts := s.(*TestServer)
 
-	key := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
+	key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
 	valAt := func(i int) *descpb.Descriptor {
-		return sqlbase.NewInitialDatabaseDescriptor(
+		return dbdesc.NewInitial(
 			descpb.ID(i), "foo", security.AdminRole,
 		).DescriptorProto()
 	}
@@ -657,13 +658,11 @@ func TestListenerFileCreation(t *testing.T) {
 	}
 
 	li := listenerInfo{
-		listenRPC:       s.RPCAddr(),
-		advertiseRPC:    s.ServingRPCAddr(),
-		listenSQL:       s.SQLAddr(),
-		advertiseSQL:    s.ServingSQLAddr(),
-		listenTenant:    s.TenantAddr(),
-		advertiseTenant: s.ServingTenantAddr(),
-		listenHTTP:      s.HTTPAddr(),
+		listenRPC:    s.RPCAddr(),
+		advertiseRPC: s.ServingRPCAddr(),
+		listenSQL:    s.SQLAddr(),
+		advertiseSQL: s.ServingSQLAddr(),
+		listenHTTP:   s.HTTPAddr(),
 	}
 	expectedFiles := li.Iter()
 

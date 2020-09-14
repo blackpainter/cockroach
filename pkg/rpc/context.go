@@ -26,6 +26,7 @@ import (
 	circuit "github.com/cockroachdb/circuitbreaker"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -114,30 +115,26 @@ func spanInclusionFuncForClient(
 
 type serverOpts struct {
 	interceptor func(fullMethod string) error
-	tenant      bool
 }
 
 // ServerOption is a configuration option passed to NewServer.
 type ServerOption func(*serverOpts)
 
-// ForTenant is an option to NewServer that results in the server being set
-// up to validate incoming tenants. Without this option, the created server will
-// use the KV-internal node certificates. With it, it uses tenant server
-// certificates.
-func ForTenant(opts *serverOpts) {
-	opts.tenant = true
-}
-
 // WithInterceptor adds an additional interceptor. The interceptor is called before
 // streaming and unary RPCs and may inject an error.
-//
-// This option can only be used once (i.e. interceptors can not be chained).
 func WithInterceptor(f func(fullMethod string) error) ServerOption {
 	return func(opts *serverOpts) {
-		if opts.interceptor != nil {
-			panic("interceptor can only be set once")
+		if opts.interceptor == nil {
+			opts.interceptor = f
+		} else {
+			f := opts.interceptor
+			opts.interceptor = func(fullMethod string) error {
+				if err := f(fullMethod); err != nil {
+					return err
+				}
+				return f(fullMethod)
+			}
 		}
-		opts.interceptor = f
 	}
 }
 
@@ -173,13 +170,7 @@ func NewServer(ctx *Context, opts ...ServerOption) *grpc.Server {
 		grpc.StatsHandler(&ctx.stats),
 	}
 	if !ctx.Config.Insecure {
-		var tlsConfig *tls.Config
-		var err error
-		if !o.tenant {
-			tlsConfig, err = ctx.GetServerTLSConfig()
-		} else {
-			tlsConfig, err = ctx.GetTenantServerTLSConfig()
-		}
+		tlsConfig, err := ctx.GetServerTLSConfig()
 		if err != nil {
 			panic(err)
 		}
@@ -192,12 +183,8 @@ func NewServer(ctx *Context, opts ...ServerOption) *grpc.Server {
 	var streamInterceptor []grpc.StreamServerInterceptor
 
 	if !ctx.Config.Insecure {
-		var a auth
-		if !o.tenant {
-			a = kvAuth{}
-		} else {
-			a = tenantAuth{}
-		}
+		a := kvAuth{}
+
 		unaryInterceptor = append(unaryInterceptor, a.AuthUnary())
 		streamInterceptor = append(streamInterceptor, a.AuthStream())
 	}
@@ -432,7 +419,7 @@ func NewContext(opts ContextOptions) *Context {
 
 	ctx := &Context{
 		ContextOptions:  opts,
-		SecurityContext: MakeSecurityContext(opts.Config, opts.TenantID),
+		SecurityContext: MakeSecurityContext(opts.Config, security.ClusterTLSSettings(opts.Settings), opts.TenantID),
 		breakerClock: breakerClock{
 			clock: opts.Clock,
 		},
@@ -516,6 +503,13 @@ func (a internalClientAdapter) RangeLookup(
 	ctx context.Context, rl *roachpb.RangeLookupRequest, _ ...grpc.CallOption,
 ) (*roachpb.RangeLookupResponse, error) {
 	return a.InternalServer.RangeLookup(ctx, rl)
+}
+
+// Join implements the roachpb.InternalClient interface.
+func (a internalClientAdapter) Join(
+	ctx context.Context, req *roachpb.JoinNodeRequest, _ ...grpc.CallOption,
+) (*roachpb.JoinNodeResponse, error) {
+	return a.InternalServer.Join(ctx, req)
 }
 
 type respStreamClientAdapter struct {
@@ -710,14 +704,13 @@ func (ctx *Context) grpcDialOptions(
 	if ctx.Config.Insecure {
 		dialOpts = append(dialOpts, grpc.WithInsecure())
 	} else {
-		var err error
 		var tlsConfig *tls.Config
+		var err error
 		if ctx.tenID == roachpb.SystemTenantID {
 			tlsConfig, err = ctx.GetClientTLSConfig()
 		} else {
 			tlsConfig, err = ctx.GetTenantClientTLSConfig()
 		}
-
 		if err != nil {
 			return nil, err
 		}
@@ -967,7 +960,7 @@ func (ctx *Context) grpcDialRaw(
 	dialerFunc := dialer.dial
 	if ctx.Knobs.ArtificialLatencyMap != nil {
 		latency := ctx.Knobs.ArtificialLatencyMap[target]
-		log.VEventf(ctx.masterCtx, 1, "Connecting to node %s (%d) with simulated latency %dms", target, remoteNodeID,
+		log.VEventf(ctx.masterCtx, 1, "connecting to node %s (%d) with simulated latency %dms", target, remoteNodeID,
 			latency)
 		dialer := artificialLatencyDialer{
 			dialerFunc: dialerFunc,

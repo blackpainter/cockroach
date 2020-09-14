@@ -19,7 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -99,7 +99,7 @@ func (ju *JobUpdater) hasUpdates() bool {
 // defined in jobs.go.
 func (j *Job) Update(ctx context.Context, updateFn UpdateFn) error {
 	if j.id == nil {
-		return errors.New("Job: cannot update: job not created")
+		return errors.New("job: cannot update: job not created")
 	}
 
 	var payload *jobspb.Payload
@@ -107,7 +107,7 @@ func (j *Job) Update(ctx context.Context, updateFn UpdateFn) error {
 	if err := j.runInTxn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		const selectStmt = "SELECT status, payload, progress FROM system.jobs WHERE id = $1"
 		row, err := j.registry.ex.QueryRowEx(
-			ctx, "log-job", txn, sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			ctx, "log-job", txn, sessiondata.InternalExecutorOverride{User: security.RootUser},
 			selectStmt, *j.id)
 		if err != nil {
 			return err
@@ -118,7 +118,7 @@ func (j *Job) Update(ctx context.Context, updateFn UpdateFn) error {
 
 		statusString, ok := row[0].(*tree.DString)
 		if !ok {
-			return errors.Errorf("Job: expected string status on job %d, but got %T", *j.id, statusString)
+			return errors.AssertionFailedf("job %d: expected string status, but got %T", *j.id, statusString)
 		}
 		status := Status(*statusString)
 		if payload, err = UnmarshalPayload(row[1]); err != nil {
@@ -194,7 +194,7 @@ func (j *Job) Update(ctx context.Context, updateFn UpdateFn) error {
 		}
 		if n != 1 {
 			return errors.Errorf(
-				"Job: expected exactly one row affected, but %d rows affected by job update", n,
+				"job %d: expected exactly one row affected, but %d rows affected by job update", *j.id, n,
 			)
 		}
 		return nil

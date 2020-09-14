@@ -23,13 +23,12 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -67,7 +66,8 @@ func TestCopyNullInfNaN(t *testing.T) {
 			ip INET NULL,
 			tz TIMESTAMPTZ NULL,
 			geography GEOGRAPHY NULL,
-			geometry GEOMETRY NULL
+			geometry GEOMETRY NULL,
+			box2d BOX2D NULL
 		);
 	`); err != nil {
 		t.Fatal(err)
@@ -80,16 +80,16 @@ func TestCopyNullInfNaN(t *testing.T) {
 
 	stmt, err := txn.Prepare(pq.CopyIn(
 		"t", "i", "f", "s", "b", "d", "t", "ttz",
-		"ts", "n", "o", "e", "u", "ip", "tz", "geography", "geometry"))
+		"ts", "n", "o", "e", "u", "ip", "tz", "geography", "geometry", "box2d"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	input := [][]interface{}{
-		{nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
-		{nil, math.Inf(1), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
-		{nil, math.Inf(-1), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
-		{nil, math.NaN(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
+		{nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
+		{nil, math.Inf(1), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
+		{nil, math.Inf(-1), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
+		{nil, math.NaN(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
 	}
 
 	for _, in := range input {
@@ -166,7 +166,8 @@ func TestCopyRandom(t *testing.T) {
 			ip INET,
 			tz TIMESTAMPTZ,
 			geography GEOGRAPHY NULL,
-			geometry GEOMETRY NULL
+			geometry GEOMETRY NULL,
+			box2d BOX2D NULL
 		);
 		SET extra_float_digits = 3; -- to preserve floats entirely
 	`); err != nil {
@@ -178,7 +179,7 @@ func TestCopyRandom(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stmt, err := txn.Prepare(pq.CopyInSchema("d", "t", "id", "n", "o", "i", "f", "e", "t", "ttz", "ts", "s", "b", "u", "ip", "tz", "geography", "geometry"))
+	stmt, err := txn.Prepare(pq.CopyInSchema("d", "t", "id", "n", "o", "i", "f", "e", "t", "ttz", "ts", "s", "b", "u", "ip", "tz", "geography", "geometry", "box2d"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +202,7 @@ func TestCopyRandom(t *testing.T) {
 		types.TimestampTZ,
 		types.Geography,
 		types.Geometry,
+		types.Box2D,
 	}
 
 	var inputs [][]interface{}
@@ -213,7 +215,7 @@ func TestCopyRandom(t *testing.T) {
 				// Special handling for ID field
 				ds = strconv.Itoa(i)
 			} else {
-				d := sqlbase.RandDatum(rng, t, false)
+				d := rowenc.RandDatum(rng, t, false)
 				ds = tree.AsStringWithFlags(d, tree.FmtBareStrings)
 				switch t {
 				case types.Float:
@@ -401,76 +403,6 @@ func TestCopyError(t *testing.T) {
 	}
 	if err := txn.Rollback(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestCopyOne verifies that only one COPY can run at once.
-func TestCopyOne(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	skip.WithIssue(t, 18352)
-
-	params, _ := tests.CreateTestServerParams()
-	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
-
-	if _, err := db.Exec(`
-		CREATE DATABASE d;
-		SET DATABASE = d;
-		CREATE TABLE t (
-			i INT PRIMARY KEY
-		);
-	`); err != nil {
-		t.Fatal(err)
-	}
-
-	txn, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := txn.Prepare(pq.CopyIn("t", "i")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := txn.Prepare(pq.CopyIn("t", "i")); err == nil {
-		t.Fatal("expected error")
-	}
-}
-
-// TestCopyInProgress verifies that after a COPY has started another statement
-// cannot run.
-func TestCopyInProgress(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	skip.WithIssue(t, 18352)
-
-	params, _ := tests.CreateTestServerParams()
-	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
-
-	if _, err := db.Exec(`
-		CREATE DATABASE d;
-		SET DATABASE = d;
-		CREATE TABLE t (
-			i INT PRIMARY KEY
-		);
-	`); err != nil {
-		t.Fatal(err)
-	}
-
-	txn, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := txn.Prepare(pq.CopyIn("t", "i")); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := txn.Query("SELECT 1"); err == nil {
-		t.Fatal("expected error")
 	}
 }
 

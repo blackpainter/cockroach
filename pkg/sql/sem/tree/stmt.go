@@ -171,6 +171,14 @@ var _ CCLOnlyStatement = &Export{}
 var _ CCLOnlyStatement = &ScheduledBackup{}
 
 // StatementType implements the Statement interface.
+func (*AlterDatabaseOwner) StatementType() StatementType { return DDL }
+
+// StatementTag returns a short string identifying the type of statement.
+func (*AlterDatabaseOwner) StatementTag() string { return "ALTER DATABSE OWNER" }
+
+func (*AlterDatabaseOwner) hiddenFromShowQueries() {}
+
+// StatementType implements the Statement interface.
 func (*AlterIndex) StatementType() StatementType { return DDL }
 
 // StatementTag returns a short string identifying the type of statement.
@@ -561,6 +569,12 @@ func (*Prepare) StatementType() StatementType { return Ack }
 func (*Prepare) StatementTag() string { return "PREPARE" }
 
 // StatementType implements the Statement interface.
+func (*RefreshMaterializedView) StatementType() StatementType { return DDL }
+
+// StatementTag implements the Statement interface.
+func (*RefreshMaterializedView) StatementTag() string { return "REFRESH MATERIALIZED VIEW" }
+
+// StatementType implements the Statement interface.
 func (*ReleaseSavepoint) StatementType() StatementType { return Ack }
 
 // StatementTag returns a short string identifying the type of statement.
@@ -577,6 +591,12 @@ func (*RenameDatabase) StatementType() StatementType { return DDL }
 
 // StatementTag returns a short string identifying the type of statement.
 func (*RenameDatabase) StatementTag() string { return "RENAME DATABASE" }
+
+// StatementType implements the Statement interface.
+func (*ReparentDatabase) StatementType() StatementType { return DDL }
+
+// StatementTag returns a short string identifying the type of statement.
+func (*ReparentDatabase) StatementTag() string { return "CONVERT TO SCHEMA" }
 
 // StatementType implements the Statement interface.
 func (*RenameIndex) StatementType() StatementType { return DDL }
@@ -768,6 +788,12 @@ func (*ShowEnums) StatementType() StatementType { return Rows }
 func (*ShowEnums) StatementTag() string { return "SHOW ENUMS" }
 
 // StatementType implements the Statement interface.
+func (*ShowTypes) StatementType() StatementType { return Rows }
+
+// StatementTag returns a short string identifying the type of statement.
+func (*ShowTypes) StatementTag() string { return "SHOW TYPES" }
+
+// StatementType implements the Statement interface.
 func (*ShowTraceForSession) StatementType() StatementType { return Rows }
 
 // StatementTag returns a short string identifying the type of statement.
@@ -919,6 +945,12 @@ func (*ShowTables) StatementType() StatementType { return Rows }
 // StatementTag returns a short string identifying the type of statement.
 func (*ShowTables) StatementTag() string { return "SHOW TABLES" }
 
+// StatementType implements the Statement interface
+func (*ShowTransactions) StatementType() StatementType { return Rows }
+
+// StatementTag returns a short string identifying the type of statement.
+func (*ShowTransactions) StatementTag() string { return "SHOW TRANSACTIONS" }
+
 // StatementType implements the Statement interface.
 func (*ShowSchemas) StatementType() StatementType { return Rows }
 
@@ -971,6 +1003,7 @@ func (*ValuesClause) StatementType() StatementType { return Rows }
 func (*ValuesClause) StatementTag() string { return "VALUES" }
 
 func (n *AlterIndex) String() string                     { return AsString(n) }
+func (n *AlterDatabaseOwner) String() string             { return AsString(n) }
 func (n *AlterSchema) String() string                    { return AsString(n) }
 func (n *AlterTable) String() string                     { return AsString(n) }
 func (n *AlterTableCmds) String() string                 { return AsString(n) }
@@ -1033,8 +1066,10 @@ func (n *ParenSelect) String() string                    { return AsString(n) }
 func (n *Prepare) String() string                        { return AsString(n) }
 func (n *ReleaseSavepoint) String() string               { return AsString(n) }
 func (n *Relocate) String() string                       { return AsString(n) }
+func (n *RefreshMaterializedView) String() string        { return AsString(n) }
 func (n *RenameColumn) String() string                   { return AsString(n) }
 func (n *RenameDatabase) String() string                 { return AsString(n) }
+func (n *ReparentDatabase) String() string               { return AsString(n) }
 func (n *RenameIndex) String() string                    { return AsString(n) }
 func (n *RenameTable) String() string                    { return AsString(n) }
 func (n *Restore) String() string                        { return AsString(n) }
@@ -1082,8 +1117,10 @@ func (n *ShowSessions) String() string                   { return AsString(n) }
 func (n *ShowSyntax) String() string                     { return AsString(n) }
 func (n *ShowTableStats) String() string                 { return AsString(n) }
 func (n *ShowTables) String() string                     { return AsString(n) }
+func (n *ShowTypes) String() string                      { return AsString(n) }
 func (n *ShowTraceForSession) String() string            { return AsString(n) }
 func (n *ShowTransactionStatus) String() string          { return AsString(n) }
+func (n *ShowTransactions) String() string               { return AsString(n) }
 func (n *ShowLastQueryStatistics) String() string        { return AsString(n) }
 func (n *ShowUsers) String() string                      { return AsString(n) }
 func (n *ShowVar) String() string                        { return AsString(n) }

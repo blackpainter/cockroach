@@ -22,9 +22,7 @@ const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 type EngineType int32
 
 const (
-	// Denotes the default engine as the underlying storage engine type. Resolves
-	// during start to the engine type last used. If left unresolved, it's treated
-	// the same as EngineTypeRocksDB.
+	// Denotes the default storage engine. Alias for EngineTypePebble.
 	EngineTypeDefault EngineType = 0
 	// Denotes RocksDB as the underlying storage engine type.
 	EngineTypeRocksDB EngineType = 1
@@ -49,7 +47,7 @@ var EngineType_value = map[string]int32{
 }
 
 func (EngineType) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_engine_e07b184ddad182cf, []int{0}
+	return fileDescriptor_engine_8f55e8e96fbe9c07, []int{0}
 }
 
 func init() {
@@ -57,10 +55,10 @@ func init() {
 }
 
 func init() {
-	proto.RegisterFile("storage/enginepb/engine.proto", fileDescriptor_engine_e07b184ddad182cf)
+	proto.RegisterFile("storage/enginepb/engine.proto", fileDescriptor_engine_8f55e8e96fbe9c07)
 }
 
-var fileDescriptor_engine_e07b184ddad182cf = []byte{
+var fileDescriptor_engine_8f55e8e96fbe9c07 = []byte{
 	// 199 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x92, 0x2d, 0x2e, 0xc9, 0x2f,
 	0x4a, 0x4c, 0x4f, 0xd5, 0x4f, 0xcd, 0x4b, 0xcf, 0xcc, 0x4b, 0x2d, 0x48, 0x82, 0x32, 0xf4, 0x0a,

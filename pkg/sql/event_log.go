@@ -30,6 +30,9 @@ const (
 	// EventLogDropDatabase is recorded when a database is dropped.
 	EventLogDropDatabase EventLogType = "drop_database"
 
+	// EventLogDropSchema is recorded when a schema is dropped.
+	EventLogDropSchema EventLogType = "drop_schema"
+
 	// EventLogCreateTable is recorded when a table is created.
 	EventLogCreateTable EventLogType = "create_table"
 	// EventLogDropTable is recorded when a table is dropped.
@@ -75,6 +78,13 @@ const (
 	// EventLogFinishSchemaRollback is recorded when a previously
 	// initiated schema change rollback has completed.
 	EventLogFinishSchemaRollback EventLogType = "finish_schema_change_rollback"
+
+	// EventLogCreateType is recorded when a type is created.
+	EventLogCreateType EventLogType = "create_type"
+	// EventLogDropType is recorded when a type is dropped.
+	EventLogDropType EventLogType = "drop_type"
+	// EventAlterType is recorded when a type is altered.
+	EventLogAlterType EventLogType = "alter_type"
 
 	// EventLogNodeJoin is recorded when a node joins the cluster.
 	EventLogNodeJoin EventLogType = "node_join"

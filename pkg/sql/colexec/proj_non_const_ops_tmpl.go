@@ -24,6 +24,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
+	"github.com/cockroachdb/cockroach/pkg/sql/colconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
@@ -51,7 +52,7 @@ const _RIGHT_TYPE_WIDTH = 0
 // _ASSIGN is the template function for assigning the first input to the result
 // of computation an operation on the second and the third inputs.
 func _ASSIGN(_, _, _, _, _, _ interface{}) {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // */}}
@@ -220,16 +221,16 @@ func _SET_SINGLE_TUPLE_PROJECTION(_HAS_NULLS bool) { // */}}
 // given left and right column types and operation.
 func GetProjectionOperator(
 	allocator *colmem.Allocator,
-	leftType *types.T,
-	rightType *types.T,
+	inputTypes []*types.T,
 	outputType *types.T,
 	op tree.Operator,
 	input colexecbase.Operator,
 	col1Idx int,
 	col2Idx int,
 	outputIdx int,
-	binFn *tree.BinOp,
 	evalCtx *tree.EvalContext,
+	binFn tree.TwoArgFn,
+	cmpExpr *tree.ComparisonExpr,
 ) (colexecbase.Operator, error) {
 	input = newVectorTypeEnforcer(allocator, input, outputType, outputIdx)
 	projOpBase := projOpBase{
@@ -241,6 +242,7 @@ func GetProjectionOperator(
 		overloadHelper: overloadHelper{binFn: binFn, evalCtx: evalCtx},
 	}
 
+	leftType, rightType := inputTypes[col1Idx], inputTypes[col2Idx]
 	switch op.(type) {
 	case tree.BinaryOperator:
 		switch op {
@@ -270,22 +272,28 @@ func GetProjectionOperator(
 			// {{end}}
 		}
 	case tree.ComparisonOperator:
-		switch op {
-		// {{range .CmpOps}}
-		case tree._NAME:
-			switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
-			// {{range .LeftFamilies}}
-			case _LEFT_CANONICAL_TYPE_FAMILY:
-				switch leftType.Width() {
-				// {{range .LeftWidths}}
-				case _LEFT_TYPE_WIDTH:
-					switch typeconv.TypeFamilyToCanonicalTypeFamily(rightType.Family()) {
-					// {{range .RightFamilies}}
-					case _RIGHT_CANONICAL_TYPE_FAMILY:
-						switch rightType.Width() {
-						// {{range .RightWidths}}
-						case _RIGHT_TYPE_WIDTH:
-							return &_OP_NAME{projOpBase: projOpBase}, nil
+		if leftType.Family() != types.TupleFamily && rightType.Family() != types.TupleFamily {
+			// Tuple comparison has special null-handling semantics, so we will
+			// fallback to the default comparison operator if either of the
+			// input vectors is of a tuple type.
+			switch op {
+			// {{range .CmpOps}}
+			case tree._NAME:
+				switch typeconv.TypeFamilyToCanonicalTypeFamily(leftType.Family()) {
+				// {{range .LeftFamilies}}
+				case _LEFT_CANONICAL_TYPE_FAMILY:
+					switch leftType.Width() {
+					// {{range .LeftWidths}}
+					case _LEFT_TYPE_WIDTH:
+						switch typeconv.TypeFamilyToCanonicalTypeFamily(rightType.Family()) {
+						// {{range .RightFamilies}}
+						case _RIGHT_CANONICAL_TYPE_FAMILY:
+							switch rightType.Width() {
+							// {{range .RightWidths}}
+							case _RIGHT_TYPE_WIDTH:
+								return &_OP_NAME{projOpBase: projOpBase}, nil
+								// {{end}}
+							}
 							// {{end}}
 						}
 						// {{end}}
@@ -294,8 +302,13 @@ func GetProjectionOperator(
 				}
 				// {{end}}
 			}
-			// {{end}}
 		}
+		return &defaultCmpProjOp{
+			projOpBase:          projOpBase,
+			adapter:             newComparisonExprAdapter(cmpExpr, evalCtx),
+			toDatumConverter:    colconv.NewVecToDatumConverter(len(inputTypes), []int{col1Idx, col2Idx}),
+			datumToVecConverter: GetDatumToPhysicalFn(outputType),
+		}, nil
 	}
 	return nil, errors.Errorf("couldn't find overload for %s %s %s", leftType.Name(), op, rightType.Name())
 }

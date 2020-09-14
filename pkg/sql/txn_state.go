@@ -53,6 +53,10 @@ type txnState struct {
 
 		// txnStart records the time that txn started.
 		txnStart time.Time
+
+		// stmtCount keeps track of the number of statements that the transaction
+		// has executed.
+		stmtCount int
 	}
 
 	// connCtx is the connection's context. This is the parent of Ctx.
@@ -198,6 +202,7 @@ func (ts *txnState) resetForNewSQLTxn(
 
 	ts.mon.Start(ts.Ctx, tranCtx.connMon, mon.BoundAccount{} /* reserved */)
 	ts.mu.Lock()
+	ts.mu.stmtCount = 0
 	if txn == nil {
 		ts.mu.txn = kv.NewTxnWithSteppingEnabled(ts.Ctx, tranCtx.db, tranCtx.nodeIDOrZero)
 		ts.mu.txn.SetDebugName(opName)
@@ -227,7 +232,7 @@ func (ts *txnState) finishSQLTxn() {
 		ts.cancel = nil
 	}
 	if ts.sp == nil {
-		panic("No span in context? Was resetForNewSQLTxn() called previously?")
+		panic(errors.AssertionFailedf("No span in context? Was resetForNewSQLTxn() called previously?"))
 	}
 
 	if ts.recordingThreshold > 0 {
@@ -240,7 +245,7 @@ func (ts *txnState) finishSQLTxn() {
 				}
 			}
 		} else {
-			log.Warning(ts.Ctx, "Missing trace when sampled was enabled.")
+			log.Warning(ts.Ctx, "missing trace when sampled was enabled")
 		}
 	}
 

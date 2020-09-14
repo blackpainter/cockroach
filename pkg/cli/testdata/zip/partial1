@@ -1,6 +1,6 @@
 zip
 ----
-debug zip --cpu-profile-duration=1s /dev/null
+debug zip --cpu-profile-duration=0s /dev/null
 establishing RPC connection to ...
 retrieving the node status to get the SQL address...
 using SQL address: ...
@@ -8,7 +8,6 @@ using SQL connection URL: postgresql://...
 writing /dev/null
 requesting data for debug/events... writing: debug/events.json
 requesting data for debug/rangelog... writing: debug/rangelog.json
-requesting data for debug/liveness... writing: debug/liveness.json
 requesting data for debug/settings... writing: debug/settings.json
 requesting data for debug/reports/problemranges... writing: debug/reports/problemranges.json
 retrieving SQL data for crdb_internal.cluster_queries... writing: debug/crdb_internal.cluster_queries.txt
@@ -27,12 +26,6 @@ retrieving SQL data for crdb_internal.partitions... writing: debug/crdb_internal
 retrieving SQL data for crdb_internal.zones... writing: debug/crdb_internal.zones.txt
 requesting nodes... writing: debug/nodes.json
 requesting liveness... writing: debug/liveness.json
-requesting CPU profiles... ok
-writing: debug/nodes/1/cpu.pprof
-writing: debug/nodes/2/cpu.pprof.err.txt
-  ^- resulted in ...
-writing: debug/nodes/3/cpu.pprof.err.txt
-  ^- resulted in ...
 writing: debug/nodes/1/status.json
 using SQL connection URL for node 1: postgresql://...
 retrieving SQL data for crdb_internal.feature_usage... writing: debug/nodes/1/crdb_internal.feature_usage.txt
@@ -47,6 +40,7 @@ retrieving SQL data for crdb_internal.node_queries... writing: debug/nodes/1/crd
 retrieving SQL data for crdb_internal.node_runtime_info... writing: debug/nodes/1/crdb_internal.node_runtime_info.txt
 retrieving SQL data for crdb_internal.node_sessions... writing: debug/nodes/1/crdb_internal.node_sessions.txt
 retrieving SQL data for crdb_internal.node_statement_statistics... writing: debug/nodes/1/crdb_internal.node_statement_statistics.txt
+retrieving SQL data for crdb_internal.node_transaction_statistics... writing: debug/nodes/1/crdb_internal.node_transaction_statistics.txt
 retrieving SQL data for crdb_internal.node_transactions... writing: debug/nodes/1/crdb_internal.node_transactions.txt
 retrieving SQL data for crdb_internal.node_txn_stats... writing: debug/nodes/1/crdb_internal.node_txn_stats.txt
 requesting data for debug/nodes/1/details... writing: debug/nodes/1/details.json
@@ -61,8 +55,7 @@ requesting goroutine files for node 1... writing: debug/nodes/1/goroutines.err.t
   ^- resulted in ...
 requesting log file ...
 requesting log file ...
-requesting log file ...
-requesting ranges... 34 found
+requesting ranges... 35 found
 writing: debug/nodes/1/ranges/1.json
 writing: debug/nodes/1/ranges/2.json
 writing: debug/nodes/1/ranges/3.json
@@ -97,6 +90,7 @@ writing: debug/nodes/1/ranges/31.json
 writing: debug/nodes/1/ranges/32.json
 writing: debug/nodes/1/ranges/33.json
 writing: debug/nodes/1/ranges/34.json
+writing: debug/nodes/1/ranges/35.json
 writing: debug/nodes/2/status.json
 using SQL connection URL for node 2: postgresql://...
 retrieving SQL data for crdb_internal.feature_usage... writing: debug/nodes/2/crdb_internal.feature_usage.txt
@@ -134,6 +128,9 @@ writing: debug/nodes/2/crdb_internal.node_sessions.txt.err.txt
   ^- resulted in ...
 retrieving SQL data for crdb_internal.node_statement_statistics... writing: debug/nodes/2/crdb_internal.node_statement_statistics.txt
 writing: debug/nodes/2/crdb_internal.node_statement_statistics.txt.err.txt
+  ^- resulted in ...
+retrieving SQL data for crdb_internal.node_transaction_statistics... writing: debug/nodes/2/crdb_internal.node_transaction_statistics.txt
+writing: debug/nodes/2/crdb_internal.node_transaction_statistics.txt.err.txt
   ^- resulted in ...
 retrieving SQL data for crdb_internal.node_transactions... writing: debug/nodes/2/crdb_internal.node_transactions.txt
 writing: debug/nodes/2/crdb_internal.node_transactions.txt.err.txt
@@ -175,6 +172,7 @@ retrieving SQL data for crdb_internal.node_queries... writing: debug/nodes/3/crd
 retrieving SQL data for crdb_internal.node_runtime_info... writing: debug/nodes/3/crdb_internal.node_runtime_info.txt
 retrieving SQL data for crdb_internal.node_sessions... writing: debug/nodes/3/crdb_internal.node_sessions.txt
 retrieving SQL data for crdb_internal.node_statement_statistics... writing: debug/nodes/3/crdb_internal.node_statement_statistics.txt
+retrieving SQL data for crdb_internal.node_transaction_statistics... writing: debug/nodes/3/crdb_internal.node_transaction_statistics.txt
 retrieving SQL data for crdb_internal.node_transactions... writing: debug/nodes/3/crdb_internal.node_transactions.txt
 retrieving SQL data for crdb_internal.node_txn_stats... writing: debug/nodes/3/crdb_internal.node_txn_stats.txt
 requesting data for debug/nodes/3/details... writing: debug/nodes/3/details.json
@@ -189,8 +187,7 @@ requesting goroutine files for node 3... writing: debug/nodes/3/goroutines.err.t
   ^- resulted in ...
 requesting log file ...
 requesting log file ...
-requesting log file ...
-requesting ranges... 34 found
+requesting ranges... 35 found
 writing: debug/nodes/3/ranges/1.json
 writing: debug/nodes/3/ranges/2.json
 writing: debug/nodes/3/ranges/3.json
@@ -225,13 +222,14 @@ writing: debug/nodes/3/ranges/31.json
 writing: debug/nodes/3/ranges/32.json
 writing: debug/nodes/3/ranges/33.json
 writing: debug/nodes/3/ranges/34.json
+writing: debug/nodes/3/ranges/35.json
 requesting list of SQL databases... 3 found
 requesting database details for defaultdb... writing: debug/schema/defaultdb@details.json
 0 tables found
 requesting database details for postgres... writing: debug/schema/postgres@details.json
 0 tables found
 requesting database details for system... writing: debug/schema/system@details.json
-28 tables found
+29 tables found
 requesting table details for system.comments... writing: debug/schema/system/comments.json
 requesting table details for system.descriptor... writing: debug/schema/system/descriptor.json
 requesting table details for system.eventlog... writing: debug/schema/system/eventlog.json
@@ -251,6 +249,7 @@ requesting table details for system.role_members... writing: debug/schema/system
 requesting table details for system.role_options... writing: debug/schema/system/role_options.json
 requesting table details for system.scheduled_jobs... writing: debug/schema/system/scheduled_jobs.json
 requesting table details for system.settings... writing: debug/schema/system/settings.json
+requesting table details for system.sqlliveness... writing: debug/schema/system/sqlliveness.json
 requesting table details for system.statement_bundle_chunks... writing: debug/schema/system/statement_bundle_chunks.json
 requesting table details for system.statement_diagnostics... writing: debug/schema/system/statement_diagnostics.json
 requesting table details for system.statement_diagnostics_requests... writing: debug/schema/system/statement_diagnostics_requests.json
@@ -261,3 +260,4 @@ requesting table details for system.users... writing: debug/schema/system/users.
 requesting table details for system.web_sessions... writing: debug/schema/system/web_sessions.json
 requesting table details for system.zones... writing: debug/schema/system/zones.json
 writing: debug/pprof-summary.sh
+writing: debug/hot-ranges.sh

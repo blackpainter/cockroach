@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/errors"
 )
 
 var sortAllTestCases []sortTestCase
@@ -294,7 +295,7 @@ func BenchmarkSort(b *testing.B) {
 					for i := range typs {
 						typs[i] = types.Int
 					}
-					batch := testAllocator.NewMemBatch(typs)
+					batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 					batch.SetLength(coldata.BatchSize())
 					ordCols := make([]execinfrapb.Ordering_Column, nCols)
 					for i := range ordCols {
@@ -343,7 +344,7 @@ func BenchmarkAllSpooler(b *testing.B) {
 				for i := range typs {
 					typs[i] = types.Int
 				}
-				batch := testAllocator.NewMemBatch(typs)
+				batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 				batch.SetLength(coldata.BatchSize())
 				for i := 0; i < nCols; i++ {
 					col := batch.ColVec(i).Int64()
@@ -402,7 +403,7 @@ func generateColumnOrdering(
 	rng *rand.Rand, nCols int, nOrderingCols int,
 ) []execinfrapb.Ordering_Column {
 	if nOrderingCols > nCols {
-		colexecerror.InternalError("nOrderingCols > nCols in generateColumnOrdering")
+		colexecerror.InternalError(errors.AssertionFailedf("nOrderingCols > nCols in generateColumnOrdering"))
 	}
 	orderingCols := make([]execinfrapb.Ordering_Column, nOrderingCols)
 	for i, col := range rng.Perm(nCols)[:nOrderingCols] {

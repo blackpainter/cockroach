@@ -471,6 +471,22 @@ define Overlaps {
     Right ScalarExpr
 }
 
+# BBoxCovers is the ~ operator when used with geometry or bounding box
+# operands. It maps to tree.RegMatch.
+[Scalar, Bool, Comparison]
+define BBoxCovers {
+    Left ScalarExpr
+    Right ScalarExpr
+}
+
+# BBoxIntersects is the && operator when used with geometry or bounding box
+# operands. It maps to tree.Overlaps.
+[Scalar, Bool, Comparison]
+define BBoxIntersects {
+    Left ScalarExpr
+    Right ScalarExpr
+}
+
 # AnyScalar is the form of ANY which refers to an ANY operation on a
 # tuple or array, as opposed to Any which operates on a subquery.
 [Scalar, Bool]
@@ -656,9 +672,9 @@ define IfErr {
 # returned.
 #
 # Note that the Whens list inside Case is used to represent all the WHEN
-# branches as well as the ELSE statement if it exists. It is of the form:
+# branches. It is of the form:
 #
-#   [(When <condval1> <expr1>),(When <condval2> <expr2>),...,<expr>]
+#   [(When <condval1> <expr1>),(When <condval2> <expr2>),...]
 #
 [Scalar]
 define Case {
@@ -844,6 +860,26 @@ define StdDev {
 
 [Scalar, Aggregate]
 define StdDevPop {
+    Input ScalarExpr
+}
+
+[Scalar, Aggregate]
+define STMakeLine {
+    Input ScalarExpr
+}
+
+[Scalar, Aggregate]
+define STExtent {
+    Input ScalarExpr
+}
+
+[Scalar, Aggregate]
+define STUnion {
+    Input ScalarExpr
+}
+
+[Scalar, Aggregate]
+define STCollect {
     Input ScalarExpr
 }
 

@@ -15,11 +15,15 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
 )
@@ -34,10 +38,24 @@ import (
 //   Notes: postgres requires the object owner.
 //          mysql requires the "grant option" and the same privileges, and sometimes superuser.
 func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
-	if n.Targets.Databases != nil {
+	var grantOn privilege.ObjectType
+	switch {
+	case n.Targets.Databases != nil:
 		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnDatabase)
-	} else {
+		grantOn = privilege.Database
+	case n.Targets.Schemas != nil:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnSchema)
+		grantOn = privilege.Schema
+	case n.Targets.Types != nil:
+		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnType)
+		grantOn = privilege.Type
+	default:
 		sqltelemetry.IncIAMGrantPrivilegesCounter(sqltelemetry.OnTable)
+		grantOn = privilege.Table
+	}
+
+	if err := privilege.ValidatePrivileges(n.Privileges, grantOn); err != nil {
+		return nil, err
 	}
 
 	return &changePrivilegesNode{
@@ -47,6 +65,7 @@ func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
 		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee string) {
 			privDesc.Grant(grantee, n.Privileges)
 		},
+		grantOn: grantOn,
 	}, nil
 }
 
@@ -60,10 +79,24 @@ func (p *planner) Grant(ctx context.Context, n *tree.Grant) (planNode, error) {
 //   Notes: postgres requires the object owner.
 //          mysql requires the "grant option" and the same privileges, and sometimes superuser.
 func (p *planner) Revoke(ctx context.Context, n *tree.Revoke) (planNode, error) {
-	if n.Targets.Databases != nil {
+	var grantOn privilege.ObjectType
+	switch {
+	case n.Targets.Databases != nil:
 		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnDatabase)
-	} else {
+		grantOn = privilege.Database
+	case n.Targets.Schemas != nil:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnSchema)
+		grantOn = privilege.Schema
+	case n.Targets.Types != nil:
+		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnType)
+		grantOn = privilege.Type
+	default:
 		sqltelemetry.IncIAMRevokePrivilegesCounter(sqltelemetry.OnTable)
+		grantOn = privilege.Table
+	}
+
+	if err := privilege.ValidatePrivileges(n.Privileges, grantOn); err != nil {
+		return nil, err
 	}
 
 	return &changePrivilegesNode{
@@ -71,8 +104,9 @@ func (p *planner) Revoke(ctx context.Context, n *tree.Revoke) (planNode, error) 
 		grantees:     n.Grantees,
 		desiredprivs: n.Privileges,
 		changePrivilege: func(privDesc *descpb.PrivilegeDescriptor, grantee string) {
-			privDesc.Revoke(grantee, n.Privileges)
+			privDesc.Revoke(grantee, n.Privileges, grantOn)
 		},
+		grantOn: grantOn,
 	}, nil
 }
 
@@ -81,6 +115,7 @@ type changePrivilegesNode struct {
 	grantees        tree.NameList
 	desiredprivs    privilege.List
 	changePrivilege func(*descpb.PrivilegeDescriptor, string)
+	grantOn         privilege.ObjectType
 }
 
 // ReadingOwnWrites implements the planNodeReadingOwnWrites interface.
@@ -107,11 +142,11 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 		}
 	}
 
-	var descriptors []sqlbase.Descriptor
+	var descriptors []catalog.Descriptor
 	// DDL statements avoid the cache to avoid leases, and can view non-public descriptors.
 	// TODO(vivek): check if the cache can be used.
 	p.runWithOptions(resolveFlags{skipCache: true}, func() {
-		descriptors, err = getDescriptorsFromTargetList(ctx, p, n.targets)
+		descriptors, err = getDescriptorsFromTargetListForPrivilegeChange(ctx, p, n.targets)
 	})
 	if err != nil {
 		return err
@@ -140,28 +175,39 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 
 		// Validate privilege descriptors directly as the db/table level Validate
 		// may fix up the descriptor.
-		if err := privileges.Validate(descriptor.GetID()); err != nil {
+		if err := privileges.Validate(descriptor.GetID(), n.grantOn); err != nil {
 			return err
 		}
 
 		switch d := descriptor.(type) {
-		case *sqlbase.ImmutableDatabaseDescriptor:
-			if err := d.Validate(); err != nil {
-				return err
-			}
-			if err := catalogkv.WriteDescToBatch(
-				ctx,
-				p.extendedEvalCtx.Tracing.KVTracingEnabled(),
-				p.ExecCfg().Settings,
-				b,
-				p.ExecCfg().Codec,
-				descriptor.GetID(),
-				descriptor,
-			); err != nil {
-				return err
+		case *dbdesc.Mutable:
+			if p.Descriptors().DatabaseLeasingUnsupported() {
+				if err := d.Validate(); err != nil {
+					return err
+				}
+				if err := catalogkv.WriteDescToBatch(
+					ctx,
+					p.extendedEvalCtx.Tracing.KVTracingEnabled(),
+					p.ExecCfg().Settings,
+					b,
+					p.ExecCfg().Codec,
+					descriptor.GetID(),
+					descriptor,
+				); err != nil {
+					return err
+				}
+			} else {
+				if err := p.writeDatabaseChangeToBatch(ctx, d, b); err != nil {
+					return err
+				}
+				if err := p.createNonDropDatabaseChangeJob(ctx, d.ID,
+					fmt.Sprintf("updating privileges for database %d", d.ID),
+				); err != nil {
+					return err
+				}
 			}
 
-		case *sqlbase.MutableTableDescriptor:
+		case *tabledesc.Mutable:
 			// TODO (lucy): This should probably have a single consolidated job like
 			// DROP DATABASE.
 			if err := p.createOrUpdateSchemaChangeJob(
@@ -175,6 +221,19 @@ func (n *changePrivilegesNode) startExec(params runParams) error {
 				if err := p.writeSchemaChangeToBatch(ctx, d, b); err != nil {
 					return err
 				}
+			}
+		case *typedesc.Mutable:
+			err := p.writeTypeSchemaChange(ctx, d, fmt.Sprintf("updating privileges for type %d", d.ID))
+			if err != nil {
+				return err
+			}
+		case *schemadesc.Mutable:
+			if err := p.writeSchemaDescChange(
+				ctx,
+				d,
+				fmt.Sprintf("updating privileges for schema %d", d.ID),
+			); err != nil {
+				return err
 			}
 		}
 	}

@@ -16,7 +16,7 @@ if [[ -z "${DRY_RUN}" ]] ; then
   google_credentials=$GOOGLE_COCKROACH_CLOUD_IMAGES_CREDENTIALS
   gcr_repository="us.gcr.io/cockroach-cloud-images/cockroach"
 else
-  bucket="${BUCKET:-cockroach-release-test}"
+  bucket="${BUCKET:-cockroach-builds-test}"
   google_credentials="$GOOGLE_COCKROACH_RELEASE_CREDENTIALS"
   gcr_repository="us.gcr.io/cockroach-release/cockroach-test"
   build_name="${build_name}.dryrun"
@@ -76,3 +76,13 @@ if [[ -n "${release_branch}" ]] ; then
   gcloud container images add-tag "${gcr_repository}:${build_name}" "${gcr_repository}:latest-${release_branch}-build"
 fi
 tc_end_block "Tag docker image as latest-build"
+
+
+# Make finding the tag name easy.
+cat << EOF
+
+
+Git Tag: ${build_name}
+
+
+EOF

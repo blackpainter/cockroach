@@ -54,7 +54,7 @@ const (
 	defaultScanMinIdleTime   = 10 * time.Millisecond
 	defaultScanMaxIdleTime   = 1 * time.Second
 
-	defaultStorePath = "cockroach-data"
+	DefaultStorePath = "cockroach-data"
 	// TempDirPrefix is the filename prefix of any temporary subdirectory
 	// created.
 	TempDirPrefix = "cockroach-temp"
@@ -122,6 +122,14 @@ type BaseConfig struct {
 	// ReadWithinUncertaintyIntervalError.
 	MaxOffset MaxOffsetType
 
+	// GoroutineDumpDirName is the directory name for goroutine dumps using
+	// goroutinedumper.
+	GoroutineDumpDirName string
+
+	// HeapProfileDirName is the directory name for heap profiles using
+	// heapprofiler. If empty, no heap profiles will be collected.
+	HeapProfileDirName string
+
 	// DefaultZoneConfig is used to set the default zone config inside the server.
 	// It can be overridden during tests by setting the DefaultZoneConfigOverride
 	// server testing knob.
@@ -172,8 +180,9 @@ type KVConfig struct {
 	// in zone configs.
 	Attrs string
 
-	// JoinList is a list of node addresses that act as bootstrap hosts for
-	// connecting to the gossip network.
+	// JoinList is a list of node addresses that is used to form a network of KV
+	// servers. Assuming a connected graph, it suffices to initialize any server
+	// in the network.
 	JoinList base.JoinListType
 
 	// JoinPreferSRVRecords, if set, causes the lookup logic for the
@@ -193,14 +202,6 @@ type KVConfig struct {
 	// TimeSeriesServerConfig contains configuration specific to the time series
 	// server.
 	TimeSeriesServerConfig ts.ServerConfig
-
-	// GoroutineDumpDirName is the directory name for goroutine dumps using
-	// goroutinedumper.
-	GoroutineDumpDirName string
-
-	// HeapProfileDirName is the directory name for heap profiles using
-	// heapprofiler. If empty, no heap profiles will be collected.
-	HeapProfileDirName string
 
 	// Parsed values.
 
@@ -332,6 +333,12 @@ type SQLConfig struct {
 	//
 	// Only applies when the SQL server is deployed individually.
 	TenantKVAddrs []string
+
+	// TenantIDCodecOverride overrides the tenant ID used to construct the SQL
+	// server's codec, but nothing else (e.g. its certs). Used for testing.
+	//
+	// Only applies when the SQL server is deployed individually.
+	TenantIDCodecOverride roachpb.TenantID
 }
 
 // MakeSQLConfig returns a SQLConfig with default values.
@@ -377,7 +384,7 @@ func SetOpenFileLimitForOneStore() (uint64, error) {
 
 // MakeConfig returns a Config for the system tenant with default values.
 func MakeConfig(ctx context.Context, st *cluster.Settings) Config {
-	storeSpec, err := base.NewStoreSpec(defaultStorePath)
+	storeSpec, err := base.NewStoreSpec(DefaultStorePath)
 	if err != nil {
 		panic(err)
 	}
@@ -542,7 +549,7 @@ func (cfg *Config) CreateEngines(ctx context.Context) (Engines, error) {
 				UseFileRegistry: spec.UseFileRegistry,
 				ExtraOptions:    spec.ExtraOptions,
 			}
-			if cfg.StorageEngine == enginepb.EngineTypePebble || cfg.StorageEngine == enginepb.EngineTypeDefault {
+			if cfg.StorageEngine == enginepb.EngineTypeDefault || cfg.StorageEngine == enginepb.EngineTypePebble {
 				pebbleConfig := storage.PebbleConfig{
 					StorageConfig: storageConfig,
 					Opts:          storage.DefaultPebbleOptions(),
@@ -646,11 +653,13 @@ func (cfg *Config) InitNode(ctx context.Context) error {
 
 // FilterGossipBootstrapResolvers removes any gossip bootstrap resolvers which
 // match either this node's listen address or its advertised host address.
-func (cfg *Config) FilterGossipBootstrapResolvers(
-	ctx context.Context, listen, advert net.Addr,
-) []resolver.Resolver {
+func (cfg *Config) FilterGossipBootstrapResolvers(ctx context.Context) []resolver.Resolver {
+	var listen, advert net.Addr
+	listen = util.NewUnresolvedAddr("tcp", cfg.Addr)
+	advert = util.NewUnresolvedAddr("tcp", cfg.AdvertiseAddr)
 	filtered := make([]resolver.Resolver, 0, len(cfg.GossipBootstrapResolvers))
 	addrs := make([]string, 0, len(cfg.GossipBootstrapResolvers))
+
 	for _, r := range cfg.GossipBootstrapResolvers {
 		if r.Addr() == advert.String() || r.Addr() == listen.String() {
 			if log.V(1) {

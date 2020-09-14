@@ -13,11 +13,11 @@ package exec
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -73,7 +73,7 @@ type ScanParams struct {
 //
 // The node must be able to support this output ordering given its other
 // configuration parameters.
-type OutputOrdering sqlbase.ColumnOrdering
+type OutputOrdering colinfo.ColumnOrdering
 
 // Subquery encapsulates information about a subquery that is part of a plan.
 type Subquery struct {
@@ -145,7 +145,7 @@ type AggInfo struct {
 // passed through to the execution engine.
 type WindowInfo struct {
 	// Cols is the set of columns that are returned from the windowing operator.
-	Cols sqlbase.ResultColumns
+	Cols colinfo.ResultColumns
 
 	// TODO(justin): refactor this to be a single array of structs.
 
@@ -167,14 +167,7 @@ type WindowInfo struct {
 	Partition []NodeColumnOrdinal
 
 	// Ordering is the set of input columns to order on.
-	Ordering sqlbase.ColumnOrdering
-
-	// RangeOffsetColumn is the column ID of a single column from ORDER BY clause
-	// when window frame has RANGE mode of framing and at least one 'offset'
-	// boundary. We store it separately because the ordering might be simplified
-	// (when that single column is in Partition), but the execution still needs
-	// to know the original ordering.
-	RangeOffsetColumn NodeColumnOrdinal
+	Ordering colinfo.ColumnOrdering
 }
 
 // ExplainEnvData represents the data that's going to be displayed in EXPLAIN (env).
@@ -196,12 +189,12 @@ type KVOption struct {
 // RecursiveCTEIterationFn creates a plan for an iteration of WITH RECURSIVE,
 // given the result of the last iteration (as a node created by
 // ConstructBuffer).
-type RecursiveCTEIterationFn func(bufferRef Node) (Plan, error)
+type RecursiveCTEIterationFn func(ef Factory, bufferRef Node) (Plan, error)
 
 // ApplyJoinPlanRightSideFn creates a plan for an iteration of ApplyJoin, given
 // a row produced from the left side. The plan is guaranteed to produce the
 // rightColumns passed to ConstructApplyJoin (in order).
-type ApplyJoinPlanRightSideFn func(leftRow tree.Datums) (Plan, error)
+type ApplyJoinPlanRightSideFn func(ef Factory, leftRow tree.Datums) (Plan, error)
 
 // Cascade describes a cascading query. The query uses a node created by
 // ConstructBuffer as an input; it should only be triggered if this buffer is
@@ -234,6 +227,7 @@ type Cascade struct {
 		execFactory Factory,
 		bufferRef Node,
 		numBufferedRows int,
+		allowAutoCommit bool,
 	) (Plan, error)
 }
 
@@ -264,3 +258,36 @@ type InsertFastPathFKCheck struct {
 // MkErrFn is a function that generates an error which includes values from a
 // relevant row.
 type MkErrFn func(tree.Datums) error
+
+// ExplainFactory is an extension of Factory used when constructing a plan that
+// can be explained. It allows annotation of nodes with extra information.
+type ExplainFactory interface {
+	Factory
+
+	// AnnotateNode annotates a constructed Node with extra information.
+	AnnotateNode(n Node, id ExplainAnnotationID, value interface{})
+}
+
+// ExplainAnnotationID identifies the type of a node annotation.
+type ExplainAnnotationID int
+
+const (
+	// EstimatedStatsID is an annotation with a *EstimatedStats value.
+	EstimatedStatsID ExplainAnnotationID = iota
+)
+
+// EstimatedStats  contains estimated statistics about a given operator.
+type EstimatedStats struct {
+	// TableStatsAvailable is true if all the tables involved by this operator
+	// (directly or indirectly) had table statistics.
+	TableStatsAvailable bool
+	// RowCount is the estimated number of rows produced by the operator.
+	RowCount float64
+	// Cost is the estimated cost of the operator. This cost includes the costs of
+	// the child operators.
+	Cost float64
+}
+
+// BuildPlanForExplainFn builds an execution plan against the given
+// ExplainFactory.
+type BuildPlanForExplainFn func(ef ExplainFactory) (Plan, error)

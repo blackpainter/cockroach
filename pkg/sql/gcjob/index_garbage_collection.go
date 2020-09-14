@@ -19,7 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -39,7 +39,14 @@ func gcIndexes(
 		log.Infof(ctx, "GC is being considered on table %d for indexes indexes: %+v", parentID, droppedIndexes)
 	}
 
-	var parentTable *sqlbase.ImmutableTableDescriptor
+	// Before deleting any indexes, ensure that old versions of the table descriptor
+	// are no longer in use. This is necessary in the case of truncate, where we
+	// schedule a GC Job in the transaction that commits the truncation.
+	if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, parentID); err != nil {
+		return false, err
+	}
+
+	var parentTable *tabledesc.Immutable
 	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
 		parentTable, err = catalogkv.MustGetTableDescByID(ctx, txn, execCfg.Codec, parentID)
 		return err
@@ -79,7 +86,7 @@ func gcIndexes(
 func clearIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	index descpb.IndexDescriptor,
 ) error {
 	log.Infof(ctx, "clearing index %d from table %d", index.ID, tableDesc.ID)
@@ -106,7 +113,7 @@ func clearIndex(
 func completeDroppedIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	table *sqlbase.ImmutableTableDescriptor,
+	table *tabledesc.Immutable,
 	indexID descpb.IndexID,
 	progress *jobspb.SchemaChangeGCProgress,
 ) error {

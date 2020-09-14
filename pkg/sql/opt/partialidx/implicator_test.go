@@ -118,7 +118,10 @@ func TestImplicator(t *testing.T) {
 			if remainingFilters.IsTrue() {
 				buf.WriteString("none")
 			} else {
-				execBld := execbuilder.New(nil /* factory */, f.Memo(), nil /* catalog */, &remainingFilters, &evalCtx)
+				execBld := execbuilder.New(
+					nil /* factory */, f.Memo(), nil /* catalog */, &remainingFilters,
+					&evalCtx, false, /* allowAutoCommit */
+				)
 				expr, err := execBld.BuildScalar(&iVarHelper)
 				if err != nil {
 					d.Fatalf(t, "unexpected error: %v\n", err)
@@ -194,6 +197,12 @@ func BenchmarkImplicator(b *testing.B) {
 			varTypes: "int, string",
 			filters:  "@1 >= 10 OR @2 = 'foo'",
 			pred:     "@1 > 0 OR @2 IN ('foo', 'bar')",
+		},
+		{
+			name:     "in-implies-or",
+			varTypes: "int",
+			filters:  "@1 IN (1, 2, 3)",
+			pred:     "@1 = 2 OR @1 IN (1, 3)",
 		},
 		{
 			name:     "and-filters-do-not-imply-pred",

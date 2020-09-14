@@ -31,10 +31,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
@@ -74,20 +74,12 @@ func (c *transientCluster) checkConfigAndSetupLogging(
 		}
 	}
 
-	// Set up logging. For demo/transient server we use non-standard
-	// behavior where we avoid file creation if possible.
-	fl := flagSetForCmd(cmd)
-	df := fl.Lookup(cliflags.LogDir.Name)
-	sf := fl.Lookup(logflags.LogToStderrName)
-	if !df.Changed && !sf.Changed {
-		// User did not request logging flags; shut down all logging.
-		// Otherwise, the demo command would cause a cockroach-data
-		// directory to appear in the current directory just for logs.
-		_ = df.Value.Set("")
-		df.Changed = true
-		_ = sf.Value.Set(log.Severity_NONE.String())
-		sf.Changed = true
-	}
+	// Override the default server store spec.
+	//
+	// This is needed because the logging setup code peeks into this to
+	// decide how to enable logging.
+	serverCfg.Stores.Specs = nil
+
 	c.stopper, err = setupAndInitializeLoggingAndProfiling(ctx, cmd)
 	if err != nil {
 		return err
@@ -156,6 +148,17 @@ func (c *transientCluster) start(
 		serv := serverFactory.New(args).(*server.TestServer)
 		if i == 0 {
 			c.s = serv
+			// The first node connects its Settings instance to the `log`
+			// package for crash reporting.
+			//
+			// There's a known shortcoming with this approach: restarting
+			// node 1 using the \demo commands will break this connection:
+			// if the user changes the cluster setting after restarting node
+			// 1, the `log` package will not see this change.
+			//
+			// TODO(knz): re-connect the `log` package every time the first
+			// node is restarted and gets a new `Settings` instance.
+			settings.SetCanonicalValuesContainer(&serv.ClusterSettings().SV)
 		}
 		servers = append(servers, serv)
 
@@ -169,7 +172,7 @@ func (c *transientCluster) start(
 		// the start routine needs to wait for the latency map construction after their RPC address has been computed.
 		if demoCtx.simulateLatency {
 			go func(i int) {
-				if err := serv.Start(args); err != nil {
+				if err := serv.Start(); err != nil {
 					errCh <- err
 				} else {
 					// Block until the ReadyFn has been called before continuing.
@@ -179,7 +182,7 @@ func (c *transientCluster) start(
 			}(i)
 			<-servRPCReadyCh
 		} else {
-			if err := serv.Start(args); err != nil {
+			if err := serv.Start(); err != nil {
 				return err
 			}
 			// Block until the ReadyFn has been called before continuing.
@@ -473,7 +476,7 @@ func (c *transientCluster) RestartNode(nodeID roachpb.NodeID) error {
 		close(readyCh)
 	}
 
-	if err := serv.Start(args); err != nil {
+	if err := serv.Start(); err != nil {
 		return err
 	}
 
@@ -687,7 +690,7 @@ func (c *transientCluster) runWorkload(
 						// Only log an error and return when the workload function throws
 						// an error, because errors these errors should be ignored, and
 						// should not interrupt the rest of the demo.
-						log.Warningf(ctx, "Error running workload query: %+v\n", err)
+						log.Warningf(ctx, "error running workload query: %+v", err)
 						return
 					}
 				}

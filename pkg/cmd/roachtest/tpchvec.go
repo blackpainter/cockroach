@@ -84,7 +84,7 @@ var (
 	slownessThresholdByVersion = map[crdbVersion]float64{
 		tpchVecVersion19_2: 1.5,
 		tpchVecVersion20_1: 1.2,
-		tpchVecVersion20_2: 1.2,
+		tpchVecVersion20_2: 1.15,
 	}
 )
 
@@ -279,16 +279,6 @@ func (p tpchVecPerfTest) preTestRunHook(
 	if !p.disableStatsCreation {
 		createStatsFromTables(t, conn, tpchTables)
 	}
-	// TODO(yuzefovich): remove this once we figure out the issue with random
-	// performance hits on query 7.
-	for node := 1; node <= c.spec.NodeCount; node++ {
-		nodeConn := c.Conn(ctx, node)
-		if _, err := nodeConn.Exec(
-			"SELECT crdb_internal.set_vmodule('vectorized_flow=1,spilling_queue=1,row_container=2,hash_row_container=2');",
-		); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 func (p *tpchVecPerfTest) postQueryRunHook(t *test, output []byte, setupIdx int) {
@@ -341,9 +331,18 @@ func (p *tpchVecPerfTest) postTestRunHook(
 			// "catch" the slowness).
 			for setupIdx, setup := range runConfig.clusterSetups {
 				performClusterSetup(t, conn, setup)
+				// performClusterSetup has changed the cluster settings;
+				// however, the session variables might contain the old values,
+				// so we will open up new connections for each of the setups in
+				// order to get the correct cluster setup on each.
+				tempConn := c.Conn(ctx, 1)
+				defer tempConn.Close()
+				if _, err := tempConn.Exec("USE tpch;"); err != nil {
+					t.Fatal(err)
+				}
 				for i := 0; i < runConfig.numRunsPerQuery; i++ {
 					t.Status(fmt.Sprintf("\nRunning EXPLAIN ANALYZE (DEBUG) for setup=%s\n", runConfig.setupNames[setupIdx]))
-					rows, err := conn.Query(fmt.Sprintf(
+					rows, err := tempConn.Query(fmt.Sprintf(
 						"EXPLAIN ANALYZE (DEBUG) %s;", tpch.QueriesByNumber[queryNum],
 					))
 					if err != nil {

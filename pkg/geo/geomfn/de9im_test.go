@@ -20,8 +20,8 @@ import (
 
 func TestRelate(t *testing.T) {
 	testCases := []struct {
-		a        *geo.Geometry
-		b        *geo.Geometry
+		a        geo.Geometry
+		b        geo.Geometry
 		expected string
 	}{
 		{leftRect, rightRect, "FF2F11212"},
@@ -49,6 +49,8 @@ func TestMatchesDE9IM(t *testing.T) {
 		{"000FFF000", "cTTFfFTTT", false, `unrecognized pattern character: c`},
 		{"120FFF021", "TTTFfFTTT", true, ""},
 		{"02FFFF000", "T**FfFTTT", true, ""},
+		{"02FFFF000", "T2*FfFTTT", true, ""},
+		{"01FFFF000", "01*FfFTTT", true, ""},
 		{"020F1F010", "TTTFFFTtT", false, ""},
 		{"020FFF0f0", "TTTFFFTtT", false, ""},
 	}
